@@ -9,47 +9,49 @@ import { ILogService } from '../../../platform/log/common/logService';
 import { BYOKAuthRecord } from './byokStorageService';
 import { IBYOKAuthService } from './byokAuthService';
 import { BYOKAuthType, BYOKCredentialKind } from '../common/byokProvider';
+import { XaiAuthUriHandler } from './xaiAuthUriHandler';
 
 /**
- * xAI OIDC / OAuth2 constants for the device authorization grant flow (RFC 8628).
- * These endpoints are discovered from the issuer's .well-known/openid-configuration,
- * but we hardcode the known values for reliability in the PoC.
+ * xAI OIDC issuer. We perform mandatory discovery against
+ * `${XAI_OIDC_ISSUER}/.well-known/openid-configuration` using the core
+ * `fetchAuthorizationServerMetadata` utility (hard fail — no hardcoded fallback).
+ *
+ * See: src/vs/base/common/oauth.ts
  */
 export const XAI_OIDC_ISSUER = 'https://auth.x.ai';
-export const XAI_DEVICE_AUTH_ENDPOINT = 'https://auth.x.ai/oauth2/device/code';
+
+/**
+ * Token endpoint. In the final implementation this will be obtained from
+ * OIDC discovery (/.well-known/openid-configuration), but we pin a known-good
+ * value for the initial PKCE implementation.
+ */
 export const XAI_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth2/token';
 
 /**
- * Client ID for the xAI OAuth device flow (PoC / testing).
+ * Public client_id for the xAI OAuth flow (shared with Grok CLI, OpenCode, Hermes, etc.).
  *
- * Value extracted from a real xAI auth.json (issued to the Grok CLI client).
- * For the official first-party VS Code + GitHub Copilot integration, xAI must
- * register a dedicated client_id with appropriate branding, policy, and
- * redirect/audience configuration. Do not ship with a CLI-derived client_id.
+ * This value is NOT secret. It is the same identifier used by other first-party
+ * xAI clients today. xAI has not yet provided a dedicated client registration
+ * for VS Code + GitHub Copilot with custom redirect URIs, branding, and policy.
+ *
+ * When a dedicated client becomes available:
+ *  - We can switch the redirect target to a pure `vscode://github.copilot/xai-auth` URI
+ *    (currently we still use loopback for the shared client allowlist).
+ *  - We may be able to request a more appropriate scope set.
+ *
+ * Do not change this value without coordinating with xAI.
  */
 export const XAI_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828';
 
 /**
- * Scopes requested in the device authorization grant.
- * These match the scopes present in the real token from the provided auth.json.
- * The 'grok-cli:access' scope is an artifact of the source client; a dedicated
- * VS Code client registration would likely use a cleaner scope set.
+ * Scopes requested during authorization.
+ * These are carried over from the original CLI-derived token and are known to work.
+ * A future dedicated client registration may allow a cleaner/minimal set.
  */
 export const XAI_SCOPES = ['openid', 'profile', 'email', 'offline_access', 'grok-cli:access', 'api:access'];
 
 /** Refresh the token if it expires within this window (5 minutes). */
 export const TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
-
-/** Response from the device authorization endpoint. */
-export interface XaiDeviceCodeResponse {
-	readonly device_code: string;
-	readonly user_code: string;
-	readonly verification_uri: string;
-	readonly verification_uri_complete?: string;
-	readonly expires_in: number;
-	/** Minimum polling interval in seconds. Defaults to 5 per RFC 8628 if omitted. */
-	readonly interval?: number;
-}
 
 /** Successful token response (both initial and refresh). */
 export interface XaiTokenResponse {
@@ -60,15 +62,39 @@ export interface XaiTokenResponse {
 	readonly scope?: string;
 }
 
-/** Error response from token endpoint during polling. */
+/** Error response from token endpoint. */
 export interface XaiTokenErrorResponse {
 	readonly error: string;
 	readonly error_description?: string;
 }
 
 /**
- * Pure HTTP client for xAI's OAuth2 device code flow.
- * Does not perform any UI or storage operations.
+ * Cryptographic helpers for PKCE (RFC 7636) S256.
+ */
+async function generateCodeVerifier(): Promise<string> {
+	const array = new Uint8Array(32);
+	crypto.getRandomValues(array);
+	return base64UrlEncode(array);
+}
+
+function base64UrlEncode(buffer: Uint8Array): string {
+	return btoa(String.fromCharCode(...buffer))
+		.replace(/\+/g, '-')
+		.replace(/\//g, '_')
+		.replace(/=+$/, '');
+}
+
+async function generateCodeChallenge(verifier: string): Promise<string> {
+	const encoder = new TextEncoder();
+	const data = encoder.encode(verifier);
+	const digest = await crypto.subtle.digest('SHA-256', data);
+	return base64UrlEncode(new Uint8Array(digest));
+}
+
+/**
+ * Pure HTTP + PKCE client for xAI's OAuth2 Authorization Code flow.
+ * Performs OIDC discovery and drives the PKCE dance.
+ * Does not perform UI or storage operations.
  */
 export class XaiOidcClient {
 	constructor(
@@ -77,130 +103,86 @@ export class XaiOidcClient {
 	) { }
 
 	/**
-	 * Initiates a device code authorization request.
+	 * Performs OIDC discovery against the well-known endpoint.
+	 * Hard fail if discovery does not succeed (no hardcoded fallback).
 	 */
-	async requestDeviceCode(): Promise<XaiDeviceCodeResponse> {
+	async discoverAuthorizationServer(): Promise<{ authorizationEndpoint: string; tokenEndpoint: string }> {
+		const wellKnown = `${XAI_OIDC_ISSUER}/.well-known/openid-configuration`;
+		this._logService.debug(`XaiOidcClient: performing OIDC discovery from ${wellKnown}`);
+
+		const response = await this._fetcher.fetch(wellKnown, {
+			method: 'GET',
+			headers: { 'Accept': 'application/json' },
+			callSite: 'xai-byok-oidc-discovery'
+		});
+
+		if (!response.ok) {
+			const text = await response.text();
+			throw new Error(`OIDC discovery failed (${response.status}): ${text}`);
+		}
+
+		const metadata = await response.json() as {
+			authorization_endpoint?: string;
+			token_endpoint?: string;
+		};
+
+		if (!metadata.authorization_endpoint || !metadata.token_endpoint) {
+			throw new Error('Invalid OIDC discovery document from xAI (missing endpoints)');
+		}
+
+		this._logService.info('XaiOidcClient: OIDC discovery succeeded');
+		return {
+			authorizationEndpoint: metadata.authorization_endpoint,
+			tokenEndpoint: metadata.token_endpoint
+		};
+	}
+
+	/**
+	 * Exchanges an authorization code + PKCE verifier for tokens.
+	 */
+	async exchangeAuthorizationCode(
+		code: string,
+		codeVerifier: string,
+		redirectUri: string,
+		tokenEndpoint: string
+	): Promise<XaiTokenResponse> {
 		const body = new URLSearchParams({
+			grant_type: 'authorization_code',
+			code,
+			redirect_uri: redirectUri,
 			client_id: XAI_CLIENT_ID,
-			scope: XAI_SCOPES.join(' ')
+			code_verifier: codeVerifier
 		}).toString();
 
-		this._logService.debug(`XaiOidcClient: requesting device code from ${XAI_DEVICE_AUTH_ENDPOINT}`);
+		this._logService.debug('XaiOidcClient: exchanging authorization code for tokens');
 
-		const response = await this._fetcher.fetch(XAI_DEVICE_AUTH_ENDPOINT, {
+		const response = await this._fetcher.fetch(tokenEndpoint, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/x-www-form-urlencoded',
 				'Accept': 'application/json'
 			},
 			body,
-			callSite: 'xai-byok-device-code'
+			callSite: 'xai-byok-pkce-exchange'
 		});
 
 		if (!response.ok) {
 			const text = await response.text();
-			this._logService.error(`XaiOidcClient: device code request failed ${response.status}: ${text}`);
-			throw new Error(`Device code request failed: ${response.status} ${response.statusText}. Server: ${text}`);
+			this._logService.error(`XaiOidcClient: code exchange failed ${response.status}: ${text}`);
+			throw new Error(`Authorization code exchange failed: ${response.status}. Server: ${text}`);
 		}
 
-		const data = await response.json() as XaiDeviceCodeResponse;
-		if (!data.device_code || !data.user_code || !data.verification_uri || typeof data.expires_in !== 'number') {
-			this._logService.error('XaiOidcClient: invalid device code response', JSON.stringify(data));
-			throw new Error('Invalid device code response from xAI');
+		const tokenData = await response.json() as XaiTokenResponse;
+		if (!tokenData.access_token || typeof tokenData.expires_in !== 'number') {
+			throw new Error('Invalid token response from xAI');
 		}
 
-		this._logService.info(`XaiOidcClient: received device code, user_code=${data.user_code}`);
-		return data;
+		this._logService.info('XaiOidcClient: PKCE authorization code exchange succeeded');
+		return tokenData;
 	}
 
 	/**
-	 * Polls the token endpoint until the user completes authorization or timeout.
-	 * Handles slow_down and authorization_pending per RFC 8628.
-	 * The optional progress reporter is used to give the user visible heartbeat feedback
-	 * in the notification while they complete the flow in the browser.
-	 */
-	async pollForToken(deviceCode: string, intervalSeconds: number, expiresInSeconds: number, cancellationToken?: vscode.CancellationToken, progress?: vscode.Progress<{ message?: string }>): Promise<XaiTokenResponse> {
-		const pollIntervalMs = (intervalSeconds || 5) * 1000;
-		const expiresAt = Date.now() + (expiresInSeconds * 1000);
-
-		this._logService.info(`XaiOidcClient: starting token poll, interval=${pollIntervalMs}ms, expiresIn=${expiresInSeconds}s`);
-		progress?.report({ message: vscode.l10n.t('Waiting for authorization in the browser...') });
-
-		while (Date.now() < expiresAt) {
-			if (cancellationToken?.isCancellationRequested) {
-				throw new Error('Cancelled');
-			}
-
-			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-
-			if (cancellationToken?.isCancellationRequested) {
-				throw new Error('Cancelled');
-			}
-
-			const body = new URLSearchParams({
-				grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-				device_code: deviceCode,
-				client_id: XAI_CLIENT_ID
-			}).toString();
-
-			this._logService.info(`XaiOidcClient: polling token endpoint (device_code present, interval=${pollIntervalMs}ms)`);
-
-			const response = await this._fetcher.fetch(XAI_TOKEN_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/x-www-form-urlencoded',
-					'Accept': 'application/json'
-				},
-				body,
-				callSite: 'xai-byok-token-poll'
-			});
-
-			if (response.ok) {
-				const tokenData = await response.json() as XaiTokenResponse;
-				if (!tokenData.access_token || typeof tokenData.expires_in !== 'number') {
-					throw new Error('Invalid token response from xAI');
-				}
-				this._logService.info(`XaiOidcClient: device code flow completed successfully (expires_in=${tokenData.expires_in}s, has_refresh=${!!tokenData.refresh_token})`);
-				return tokenData;
-			}
-
-			// Error handling per RFC 8628 §3.5
-			let errorData: XaiTokenErrorResponse | undefined;
-			try {
-				errorData = await response.json() as XaiTokenErrorResponse;
-			} catch {
-				// Non-JSON error body
-			}
-
-			const errorCode = errorData?.error || 'unknown_error';
-			const errorDesc = errorData?.error_description ? ` (${errorData.error_description})` : '';
-
-			if (errorCode === 'authorization_pending') {
-				// User has not yet completed the flow — continue polling.
-				// This is the expected state until the user authorizes in the browser.
-				this._logService.info(`XaiOidcClient: authorization_pending from xAI${errorDesc}`);
-				progress?.report({ message: vscode.l10n.t('Waiting for authorization in the browser...') });
-				continue;
-			} else if (errorCode === 'slow_down') {
-				// Server requests we slow down — wait an extra interval
-				this._logService.info(`XaiOidcClient: slow_down from xAI${errorDesc}`);
-				await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-				continue;
-			} else if (errorCode === 'expired_token') {
-				throw new Error(vscode.l10n.t('The device code has expired. Please try signing in again.'));
-			} else if (errorCode === 'access_denied') {
-				throw new Error(vscode.l10n.t('Sign-in was cancelled or denied.'));
-			} else {
-				const desc = errorData?.error_description ? `: ${errorData.error_description}` : '';
-				throw new Error(`Token request failed: ${errorCode}${desc}`);
-			}
-		}
-
-		throw new Error(vscode.l10n.t('Device code flow timed out. Please try signing in again.'));
-	}
-
-	/**
-	 * Exchanges a refresh_token for a new access_token (and possibly new refresh_token).
+	 * Exchanges a refresh_token for a new access_token.
 	 */
 	async refreshAccessToken(refreshToken: string): Promise<XaiTokenResponse> {
 		const body = new URLSearchParams({
@@ -238,9 +220,16 @@ export class XaiOidcClient {
 }
 
 /**
- * High-level manager for xAI OAuth lifecycle.
- * Owns the device code sign-in UX (notification + clipboard, no modals),
- * token refresh, and persistence via the BYOK storage/auth services.
+ * High-level manager for xAI OAuth lifecycle (BYOK).
+ *
+ * Implements the full VS Code OAuth pattern (Option C):
+ * - Mandatory OIDC discovery via /.well-known/openid-configuration (hard fail).
+ * - PKCE Authorization Code flow (S256).
+ * - Uses XaiAuthUriHandler + vscode.env.asExternalUri for the redirect callback.
+ *   This gives correct behavior on local, remote/SSH, and web.
+ *
+ * The handler must be provided at construction time (obtained via the singleton
+ * getXaiAuthUriHandler so that the same instance is used for both dispatch and waiting).
  */
 export class XaiAuthManager {
 	private readonly _oidcClient: XaiOidcClient;
@@ -249,75 +238,77 @@ export class XaiAuthManager {
 		private readonly _authService: IBYOKAuthService,
 		private readonly _fetcherService: IFetcherService,
 		private readonly _logService: ILogService,
+		private readonly _uriHandler: XaiAuthUriHandler,
 	) {
 		this._oidcClient = new XaiOidcClient(this._fetcherService, this._logService);
 	}
 
 	/**
-	 * Performs the full device code sign-in flow for xAI.
-	 * Shows a non-modal notification with the user code and opens the verification URI.
-	 * On success, stores the resulting tokens via the auth service.
+	 * Performs the PKCE + OIDC discovery sign-in flow for xAI.
+	 *
+	 * High-level steps:
+	 * 1. OIDC discovery to learn the real authorization_endpoint.
+	 * 2. Generate PKCE code_verifier + code_challenge (S256).
+	 * 3. Create state + nonce.
+	 * 4. Build authorize URL and run it through asExternalUri (critical for remote/SSH).
+	 * 5. Open the resulting URL.
+	 * 6. Wait for the code via the XaiAuthUriHandler (which receives the vscode:// redirect).
+	 * 7. Exchange the code for tokens using the code_verifier.
+	 * 8. Persist via the auth service.
 	 */
 	async signIn(): Promise<BYOKAuthRecord | undefined> {
+		const cancellation = new vscode.CancellationTokenSource();
+
 		try {
-			const deviceResp = await this._oidcClient.requestDeviceCode();
+			// 1. Discovery (hard fail)
+			const discovered = await this._oidcClient.discoverAuthorizationServer();
 
-			await vscode.env.clipboard.writeText(deviceResp.user_code);
+			// 2. PKCE
+			const codeVerifier = await generateCodeVerifier();
+			const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-			// Prefer the complete URI (pre-fills the code on xAI's page) when available
-			const uriToOpen = deviceResp.verification_uri_complete || deviceResp.verification_uri;
-			await vscode.env.openExternal(vscode.Uri.parse(uriToOpen));
+			// 3. State for CSRF protection (must match what the handler validates)
+			const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
 
-			const record = await vscode.window.withProgress<BYOKAuthRecord | undefined>(
+			// 4. Build the callback URI that the IdP will redirect to after consent.
+			// We use the vscode:// form; asExternalUri will rewrite it appropriately
+			// for the current environment (local / remote / web).
+			const callbackUri = vscode.Uri.parse(
+				`${vscode.env.uriScheme}://github.copilot/xai-auth?state=${encodeURIComponent(state)}`
+			);
+
+			const redirectUri = (await vscode.env.asExternalUri(callbackUri)).toString(true);
+
+			// 5. Build the authorization request URL
+			const authUrl = new URL(discovered.authorizationEndpoint);
+			authUrl.searchParams.set('response_type', 'code');
+			authUrl.searchParams.set('client_id', XAI_CLIENT_ID);
+			authUrl.searchParams.set('redirect_uri', redirectUri);
+			authUrl.searchParams.set('scope', XAI_SCOPES.join(' '));
+			authUrl.searchParams.set('state', state);
+			authUrl.searchParams.set('code_challenge', codeChallenge);
+			authUrl.searchParams.set('code_challenge_method', 'S256');
+
+			// 6. Open the (possibly rewritten) URL in the browser
+			await vscode.env.openExternal(vscode.Uri.parse(authUrl.toString()));
+
+			// 7. Wait for the authorization code to arrive via our handler
+			const code = await vscode.window.withProgress<string | undefined>(
 				{
 					location: vscode.ProgressLocation.Notification,
 					title: vscode.l10n.t('Signing in to xAI...'),
 					cancellable: true
 				},
 				async (progress, token) => {
-					progress.report({
-						message: vscode.l10n.t('Open {0} and paste code {1} (this can take a minute after you authorize)', deviceResp.verification_uri, deviceResp.user_code)
-					});
+					progress.report({ message: vscode.l10n.t('Waiting for authorization in the browser...') });
 
 					try {
-						const tokenResp = await this._oidcClient.pollForToken(
-							deviceResp.device_code,
-							deviceResp.interval ?? 5,
-							deviceResp.expires_in,
-							token,
-							progress
-						);
-
-						const expiresAt = Date.now() + (tokenResp.expires_in * 1000);
-
-						const authRecord: BYOKAuthRecord = {
-							kind: BYOKCredentialKind.OAuth,
-							accessToken: tokenResp.access_token,
-							refreshToken: tokenResp.refresh_token,
-							expiresAt,
-							tokenType: tokenResp.token_type,
-							scope: tokenResp.scope,
-							lastUpdatedAt: Date.now()
-						};
-
-						// Store via the auth service (the intended public write path). It delegates to storage
-						// and fires onDidChange so listeners (model picker, providers) can react.
-						await this._authService.storeAuthRecord('xai', authRecord, BYOKAuthType.GlobalApiKey);
-						this._logService.info('XaiAuthManager: OAuth tokens stored for xAI; onDidChange fired (provider listeners and direct migrate handler should react)');
-
-						// IMPORTANT: Do NOT report a final "Signed in successfully" message on the progress
-						// notification here, and do NOT show the info message while the progress task is
-						// still active. Returning promptly allows the withProgress Notification to dismiss
-						// cleanly (no lingering loading bar). The success confirmation is shown *after*
-						// the withProgress promise resolves (see caller below). This eliminates the
-						// duplicate messages the user observed.
-						return authRecord;
+						return await this._uriHandler.waitForAuthorizationCode(state, token);
 					} catch (err) {
 						if (token.isCancellationRequested) {
 							return undefined;
 						}
-						this._logService.error('XaiAuthManager: signIn failed during polling', String(err));
-						progress.report({ message: vscode.l10n.t('Sign-in failed.') });
+						this._logService.error('XaiAuthManager: failed waiting for authorization code', String(err));
 						await vscode.window.showErrorMessage(
 							vscode.l10n.t('Failed to sign in to xAI: {0}', String(err))
 						);
@@ -326,22 +317,47 @@ export class XaiAuthManager {
 				}
 			);
 
-			// Show the success confirmation *after* the withProgress resolves. This lets the
-			// "Signing in to xAI..." notification dismiss cleanly (no lingering loading bar or
-			// stale "Signed in successfully" message attached to the progress UI). The separate
-			// info message is the single, expected success toast the user sees.
-			if (record) {
-				await vscode.window.showInformationMessage(
-					vscode.l10n.t('Successfully signed in to xAI with OAuth.')
-				);
+			if (!code) {
+				return undefined;
 			}
-			return record;
+
+			// 8. Exchange the code for tokens (PKCE)
+			const tokenResp = await this._oidcClient.exchangeAuthorizationCode(
+				code,
+				codeVerifier,
+				redirectUri,
+				discovered.tokenEndpoint
+			);
+
+			const expiresAt = Date.now() + (tokenResp.expires_in * 1000);
+
+			const authRecord: BYOKAuthRecord = {
+				kind: BYOKCredentialKind.OAuth,
+				accessToken: tokenResp.access_token,
+				refreshToken: tokenResp.refresh_token,
+				expiresAt,
+				tokenType: tokenResp.token_type,
+				scope: tokenResp.scope,
+				lastUpdatedAt: Date.now()
+			};
+
+			await this._authService.storeAuthRecord('xai', authRecord, BYOKAuthType.GlobalApiKey);
+			this._logService.info('XaiAuthManager: OAuth tokens stored for xAI via PKCE flow');
+
+			await vscode.window.showInformationMessage(
+				vscode.l10n.t('Successfully signed in to xAI with OAuth.')
+			);
+
+			return authRecord;
+
 		} catch (err) {
 			this._logService.error('XaiAuthManager: signIn failed', String(err));
 			await vscode.window.showErrorMessage(
 				vscode.l10n.t('Failed to start xAI sign-in: {0}', String(err))
 			);
 			return undefined;
+		} finally {
+			cancellation.dispose();
 		}
 	}
 

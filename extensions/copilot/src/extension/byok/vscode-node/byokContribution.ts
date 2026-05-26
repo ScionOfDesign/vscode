@@ -17,6 +17,7 @@ import { AzureBYOKModelProvider } from './azureProvider';
 import { BYOKAuthService, IBYOKAuthService } from './byokAuthService';
 import { BYOKStorageService, IBYOKStorageService } from './byokStorageService';
 import { XaiAuthManager } from './xaiAuthManager';
+import { getXaiAuthUriHandler } from './xaiAuthUriHandler';
 import { CustomEndpointBYOKModelProvider } from './customEndpointProvider';
 import { CustomOAIBYOKModelProvider } from './customOAIProvider';
 import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
@@ -50,9 +51,11 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._byokStorageService = new BYOKStorageService(extensionContext);
 		this._byokAuthService = new BYOKAuthService(this._byokStorageService);
 
-		// PoC: register the xAI OAuth manager (device code flow + proactive refresh).
-		// Future providers will follow the same pattern.
-		const xaiManager = new XaiAuthManager(this._byokAuthService, this._fetcherService, this._logService);
+		// Register the xAI OAuth manager (PKCE + OIDC discovery).
+		// The handler singleton is used both for URI dispatch (in CopilotDebugCommandContribution)
+		// and for waiting inside the sign-in flow.
+		const xaiHandler = getXaiAuthUriHandler(this._logService);
+		const xaiManager = new XaiAuthManager(this._byokAuthService, this._fetcherService, this._logService, xaiHandler);
 		this._byokAuthService.registerOAuthManager('xai', xaiManager);
 
 		this._applyPolicy();
@@ -61,8 +64,8 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			this._logService.info(`BYOK: auth changed for provider ${e.providerName}${e.modelId ? ` (model ${e.modelId})` : ''}`);
 		}));
 
-		// Register differentiated xAI OAuth commands (PoC). These are enabled via when-clauses in package.json.
-		// The handlers delegate to the unified auth service, which routes to XaiAuthManager for the device code flow.
+		// Register differentiated xAI OAuth commands. These are enabled via when-clauses in package.json.
+		// The handlers delegate to the unified auth service, which routes to XaiAuthManager for the PKCE flow.
 		this._register(commands.registerCommand('github.copilot.chat.signInXai', async () => {
 			try {
 				await this._byokAuthService.signInWithOAuth(XAIBYOKLMProvider.authProviderName);

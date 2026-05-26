@@ -26,6 +26,7 @@ import * as path from '../../../util/vs/base/common/path';
 import { URI } from '../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { ChatSessionsUriHandler, CustomUriHandler } from '../../chatSessions/vscode/chatSessionsUriHandler';
+import { getXaiAuthUriHandler, XaiAuthUriHandler } from '../../byok/vscode-node/xaiAuthUriHandler';
 import { EXTENSION_ID } from '../../common/constants';
 import { ILaunchConfigService, needsWorkspaceFolderForTaskError } from '../common/launchConfigService';
 import { CopilotDebugCommandSessionFactory } from '../node/copilotDebugCommandSessionFactory';
@@ -48,6 +49,7 @@ const DEBUG_COMMAND_JS = 'copilotDebugCommand.js';
 
 export class CopilotDebugCommandContribution extends Disposable implements vscode.UriHandler {
 	private chatSessionsUriHandler: CustomUriHandler;
+	private xaiAuthUriHandler: XaiAuthUriHandler | undefined;
 	private registerSerializer: Promise<void>;
 	private readonly nonce: string;
 
@@ -84,6 +86,10 @@ export class CopilotDebugCommandContribution extends Disposable implements vscod
 		this.registerSerializer = this.registerEnvironment();
 		// Initialize ChatSessionsUriHandler with extension context for storage
 		this.chatSessionsUriHandler = new ChatSessionsUriHandler(this._octoKitService, this._gitService, this._gitExtensionService, this.context, this.logService, this.fileSystemService, this.telemetryService);
+
+		// xAI OAuth PKCE handler (Option C architecture). Created via singleton so the same
+		// instance can be used both for dispatch here and passed to XaiAuthManager later.
+		this.xaiAuthUriHandler = getXaiAuthUriHandler(this.logService);
 		// Check for pending chat sessions when this contribution is initialized
 		(this.chatSessionsUriHandler as ChatSessionsUriHandler).openPendingSession().catch((err) => {
 			this.logService.error('Failed to check for pending chat sessions from debug command contribution:', err);
@@ -134,6 +140,9 @@ export class CopilotDebugCommandContribution extends Disposable implements vscod
 	handleUri(uri: vscode.Uri): vscode.ProviderResult<void> {
 		if (this.chatSessionsUriHandler.canHandleUri(uri)) {
 			return this.chatSessionsUriHandler.handleUri(uri);
+		}
+		if (this.xaiAuthUriHandler?.canHandleUri(uri)) {
+			return this.xaiAuthUriHandler.handleUri(uri);
 		}
 		const pipePath = process.platform === 'win32' ? '\\\\.\\pipe\\' + uri.path.slice(1) : uri.path;
 		const cts = new CancellationTokenSource();
