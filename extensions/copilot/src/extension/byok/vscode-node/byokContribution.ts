@@ -68,11 +68,10 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			try {
 				await this._byokAuthService.signInWithOAuth(XAIBYOKLMProvider.authProviderName);
 
-				// PoC robustness: after successful OAuth sign-in, ensure the xAI provider is registered
-				// (in case sign-in command was invoked before _applyPolicy built providers), then
-				// directly trigger the migrate for the distinct "xAI (OAuth)" group. This decouples
-				// persistence (chatLanguageModels.json) from the provider's onDidChange listener timing.
-				// The user explicitly requested an 'xAI (OAuth)' option in the model provider list.
+				// After successful OAuth sign-in, ensure the xAI provider is registered (in case
+				// the command was invoked before _applyPolicy built providers), then directly
+				// trigger migrate for the "xAI (OAuth)" group. This decouples persistence from
+				// the provider's onDidChange listener timing.
 				this._applyPolicy();
 				const cred = await this._byokAuthService.getValidCredential(XAIBYOKLMProvider.authProviderName);
 				if (cred) {
@@ -86,9 +85,6 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 						this._logService.info('BYOK: lm.migrateLanguageModelsProviderGroup completed for xAI (OAuth)');
 					} catch (migrateErr) {
 						const msg = migrateErr instanceof Error ? migrateErr.message : String(migrateErr);
-						// Treat "already exists" as success for the PoC (idempotent add after sign-in).
-						// This can happen if the user re-runs the command, or after a rename/delete
-						// left a stale group, or due to timing with the (now-silent) listener path.
 						if (msg.includes('already exists in provider group')) {
 							this._logService.info(`BYOK: migrate for xAI (OAuth) skipped (group already present): ${msg}`);
 						} else {

@@ -7,6 +7,9 @@ import * as vscode from 'vscode';
 import { ILogService } from '../../../platform/log/common/logService';
 import { CustomUriHandler } from '../../chatSessions/vscode/chatSessionsUriHandler';
 
+/** 5 minute timeout for OAuth authorization code exchange (matches other flows and the refresh threshold). */
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
 /**
  * Internal adapter + promise helper for waiting on a single VS Code event (e.g. URI callback).
  * Based on the established pattern in github-authentication and chat sessions.
@@ -78,7 +81,9 @@ export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implement
 	 * Used by the top-level dispatcher (CopilotDebugCommandContribution).
 	 */
 	public canHandleUri(uri: vscode.Uri): boolean {
-		return uri.path === '/xai-auth' || uri.path === '/xai-auth/';
+		// Normalize trailing slash for robustness (some redirect URIs may include it).
+		const normalizedPath = uri.path.endsWith('/') ? uri.path.slice(0, -1) : uri.path;
+		return normalizedPath === '/xai-auth';
 	}
 
 	/**
@@ -103,13 +108,11 @@ export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implement
 			this._codeExchangePromises.set(state, codeExchangePromise);
 		}
 
-		const FIVE_MINUTES = 300_000;
-
 		try {
 			return await Promise.race([
 				codeExchangePromise.promise,
 				new Promise<string>((_, reject) =>
-					setTimeout(() => reject(new Error('Authorization timed out')), FIVE_MINUTES)
+					setTimeout(() => reject(new Error('Authorization timed out')), FIVE_MINUTES_MS)
 				),
 				promiseFromEvent<void, string>(
 					token.onCancellationRequested,

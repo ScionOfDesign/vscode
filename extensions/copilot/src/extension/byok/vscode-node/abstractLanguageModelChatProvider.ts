@@ -54,8 +54,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		const credential = await this._getCredential(this._name);
 		if (credential) {
 			this.configureDefaultGroupIfExists(this._name, { apiKey: credential } as C);
-			// Only delete the direct api-key secret slot if we have an auth record managing credentials separately.
-			// The auth service owns the unified credential lifecycle; direct api-key secrets are a compatibility bridge.
+			// Delete the direct api-key secret if an auth record manages the credential.
 			const authRecord = await this._byokAuthService.getAuthRecord(this._name);
 			if (!authRecord) {
 				await this._byokStorageService.deleteAPIKey(this._name, BYOKAuthType.GlobalApiKey);

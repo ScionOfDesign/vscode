@@ -92,15 +92,12 @@ export class XAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 		// or sign-out) by firing the provider change event. This is the contract the core
 		// LanguageModelsService uses to know it should re-resolve models for this vendor.
 		//
-		// IMPORTANT (post-removal of dedicated dropdown): the explicit "Sign in to xAI" command
-		// (signInXai in byokContribution.ts) is the *only* place that performs the migrate for
-		// the kind-aware "xAI (OAuth)" group name. The listener and initial-load here must
-		// **only fire the event** and never call configure/migrate. This prevents:
-		//  - duplicate name errors ("xAI" already exists in group xai)
-		//  - re-adding the provider on rename/delete of the LM group
-		//  - repeated add attempts on every launch or auth change
-		// Note: we listen on the *auth* provider name (canonical 'xai') so the provider reacts
-		// to credential changes even though the LM vendor id is also 'xai'.
+		// The explicit "Sign in to xAI" command (signInXai in byokContribution.ts) is the
+		// only place that performs the migrate for the kind-aware "xAI (OAuth)" group name.
+		// The listener and initial-load here must **only fire the event** and never call
+		// configure/migrate. This prevents duplicate name errors, re-adding on rename/delete,
+		// and repeated add attempts. We listen on the *auth* provider name ('xai') so the
+		// provider reacts to credential changes even though the LM vendor id is also 'xai'.
 		this._byokAuthService.onDidChange(e => {
 			if (e.providerName === this._authProviderName) {
 				this._logService.info(`XAIBYOKLMProvider: auth changed for ${this._authProviderName}${e.modelId ? ` (model ${e.modelId})` : ''}, firing onDidChangeLanguageModelChatInformation`);
@@ -157,21 +154,10 @@ export class XAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	 * access tokens are proactively refreshed (via the registered XaiAuthManager)
 	 * before model discovery and before chat responses.
 	 *
-	 * NOTE (post-removal of dedicated dropdown + duplicate-name fixes):
-	 * This override intentionally does **not** call configureDefaultGroupIfExists / migrate.
-	 * For the xAI OAuth PoC, the *only* place that performs the migrate for the kind-aware
-	 * group name ("xAI (OAuth)" vs "xAI") is the explicit "Sign in to xAI" command handler
-	 * in byokContribution.ts. This prevents:
-	 *  - "Language model with name 'xAI' already exists in provider group xai"
-	 *  - re-adding the provider (as "x-ai" or otherwise) on rename or delete of the LM group
-	 *  - repeated add attempts on launch / auth change / model list refresh
-	 *
-	 * The method still returns a (refreshed) credential so that the base class's provide path
-	 * (`if (!apiKey) { apiKey = await this.configure... }`) can proceed with discovery for
-	 * already-persisted groups. It simply no longer creates groups as a side effect.
+	 * This override performs refresh but does not trigger group migration; the explicit
+	 * sign-in command in byokContribution is responsible for initial group setup.
 	 */
 	protected override async configureDefaultGroupWithApiKeyOnly(): Promise<string | undefined> {
-		// Only refresh + return the cred. The explicit sign-in command owns the one-time migrate.
 		const cred = await this.getCredentialWithRefresh();
 		if (cred) {
 			const record = await this._byokAuthService.getAuthRecord(this._authProviderName);
@@ -185,8 +171,7 @@ export class XAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	/**
 	 * xAI-specific override for the chat response path: force a proactive refresh
 	 * (if an OAuth record with refresh token exists) immediately before constructing
-	 * the OpenAIEndpoint. This provides belt-and-suspenders safety even if the model
-	 * info was cached without a fresh credential.
+	 * the OpenAIEndpoint.
 	 */
 	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>): Promise<OpenAIEndpoint> {
 		// Ensure we have the freshest possible xAI credential (OAuth or API key) before chat.
@@ -206,13 +191,8 @@ export class XAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	 * xAI-specific override: ensure proactive OAuth refresh happens immediately before
 	 * the actual /language-models (or /models) network call for discovery.
 	 *
-	 * Errors during discovery (e.g. transient 401/403 with a just-obtained OAuth token,
-	 * network issues, or rate limiting) are caught and logged instead of thrown. This
-	 * makes model discovery non-fatal for the OAuth path so that
-	 * lm.migrateLanguageModelsProviderGroup (core) always reaches addLanguageModelsProviderGroup
-	 * and the "xAI (OAuth)" group is persisted to chatLanguageModels.json even on the
-	 * first successful sign-in. Real models will appear on the next onDidChange-triggered
-	 * re-resolution once the token is fully valid.
+	 * Errors during discovery are caught and logged instead of thrown (non-fatal for
+	 * the OAuth path) so the provider group can still be persisted.
 	 */
 	protected override async getAllModels(silent: boolean, apiKey: string | undefined, configuration: LanguageModelChatConfiguration | undefined): Promise<OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		// Force refresh (no-op for API-key-only records) so the apiKey we pass to super is fresh.
@@ -245,9 +225,8 @@ export class XAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	 * OAuth refresh via the registered XaiAuthManager when the stored record indicates
 	 * an OAuth credential (kind === OAuth or presence of a refresh token).
 	 *
-	 * This is the primary xAI-specific hook for Step 8 (OAuth PoC). Callers (overrides of
-	 * provideLanguageModelChatInformation, createOpenAIEndPoint, etc.) should use this
-	 * instead of the base _getCredential when they need a fresh xAI credential.
+	 * Callers (overrides of provideLanguageModelChatInformation, createOpenAIEndPoint, etc.)
+	 * should use this instead of the base _getCredential when they need a fresh xAI credential.
 	 *
 	 * Uses the instance _authProviderName (the canonical 'xai' auth key) for all
 	 * BYOK auth service calls.

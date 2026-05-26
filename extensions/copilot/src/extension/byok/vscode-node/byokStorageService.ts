@@ -16,10 +16,7 @@ export interface StoredModelConfig {
  * Unified auth record for a BYOK provider or model.
  * Supports both API key authentication and OAuth / token-based authentication as first-class methods.
  *
- * With the Option 3 design, the `kind` discriminator makes the user's authentication choice
- * explicit and mutually visible ("API key" vs "OAuth sign-in") rather than implicit by which
- * optional field is populated. This enables clear UI labeling, separate sign-in flows,
- * and clean sign-out semantics per credential type.
+ * The `kind` discriminator makes the user's authentication choice explicit ("API key" vs "OAuth sign-in").
  */
 export interface BYOKAuthRecord {
 	/**
@@ -56,17 +53,25 @@ export interface BYOKAuthRecord {
 
 export interface IBYOKStorageService {
 	/**
-	 * Get API key for a provider or model
+	 * Get API key (or OAuth access token) for a provider or model.
 	 */
 	getAPIKey(providerName: string, modelId?: string): Promise<string | undefined>;
 
 	/**
-	 * Store API key for a provider or model based on auth type
+	 * Store an API key for a provider or model.
 	 */
 	storeAPIKey(providerName: string, apiKey: string, authType: BYOKAuthType, modelId?: string): Promise<void>;
 
 	/**
-	 * Delete API key for a provider or model based on auth type
+	 * Delete the API key (direct *-api-key slot only) for a provider or model.
+	 *
+	 * IMPORTANT: This intentionally deletes ONLY the legacy direct api-key secret.
+	 * It does NOT touch *-auth records. This asymmetry exists because deleteAPIKey is
+	 * called from the temporary configureDefaultGroupWithApiKeyOnly shim.
+	 * New code and OAuth sign-out paths should use deleteAuthRecord instead, which
+	 * cleans both the unified record and the api-key compatibility slot.
+	 *
+	 * Once the shim is removed, this method can be deprecated or removed.
 	 */
 	deleteAPIKey(providerName: string, authType: BYOKAuthType, modelId?: string): Promise<void>;
 
@@ -98,18 +103,26 @@ export interface IBYOKStorageService {
 
 	/**
 	 * Get the unified auth record (API key or OAuth tokens) for a provider or specific model.
-	 * Falls back to constructing a record from the old *-api-key secret slots if no *-auth record exists (read-only migration bridge for the previous storage format).
+	 *
+	 * This is the preferred API for new credential consumers and for OAuth flows.
+	 * Returns a BYOKAuthRecord which carries an explicit `kind` discriminator when written
+	 * by storeAuthRecord, plus optional apiKey or OAuth fields (accessToken, refreshToken, etc.).
 	 */
 	getAuthRecord(providerName: string, modelId?: string): Promise<BYOKAuthRecord | undefined>;
 
 	/**
-	 * Store a unified auth record for a provider or model. The record may contain either an apiKey or OAuth fields.
-	 * The authType determines whether storage is global (provider-level) or per-model.
+	 * Store a unified auth record for a provider or model.
+	 *
+	 * The record may contain an apiKey (for API-key providers) or OAuth fields (accessToken + refresh + expiresAt etc.).
+	 * The authType controls global vs per-model scoping.
 	 */
 	storeAuthRecord(providerName: string, record: BYOKAuthRecord, authType: BYOKAuthType, modelId?: string): Promise<void>;
 
 	/**
-	 * Delete the auth record (and any associated old-format api-key secret) for a provider or model.
+	 * Delete the unified auth record (and the associated api-key compatibility slot) for a provider or model.
+	 *
+	 * This is the correct delete for OAuth sign-out and for cleaning up after the migration window.
+	 * It removes both the *-auth JSON secret and the corresponding *-api-key slot. This guarantees no stale credential remains in either location.
 	 */
 	deleteAuthRecord(providerName: string, authType: BYOKAuthType, modelId?: string): Promise<void>;
 }
@@ -125,7 +138,7 @@ export class BYOKStorageService implements IBYOKStorageService {
 		// Prefer the new unified auth record (supports both apiKey and OAuth accessToken).
 		const record = await this.getAuthRecord(providerName, modelId);
 		if (record) {
-			// For OAuth records, the accessToken is used exactly in place of an API key for Bearer auth (xAI PoC).
+			// For OAuth records, the accessToken is used in place of an API key for Bearer auth.
 			if (record.accessToken && record.accessToken.trim()) {
 				return record.accessToken.trim();
 			}
@@ -134,7 +147,7 @@ export class BYOKStorageService implements IBYOKStorageService {
 			}
 		}
 
-		// Fallback to old-format direct api-key secret slots for records that have not yet been migrated to the new *-auth JSON format.
+		// Fallback to direct api-key secret slots (original format) if no unified auth record.
 		// If model-specific key is requested, try to get it first
 		if (modelId) {
 			const modelKey = await this._extensionContext.secrets.get(`copilot-byok-${providerName}-${modelId}-api-key`);
@@ -171,11 +184,9 @@ export class BYOKStorageService implements IBYOKStorageService {
 			await this._extensionContext.secrets.store(`copilot-byok-${providerName}-${modelId}-api-key`, apiKey);
 		}
 
-		// Option 3: Also write (or update) a thin *-auth JSON record with explicit kind=ApiKey.
-		// This ensures that the manual "enter API key" flow (via handleAPIKeyUpdate) produces
-		// a first-class kinded record, making the credential type visible to UI and providers.
-		// We write directly to secrets (bypassing storeAuthRecord) to avoid recursion with
-		// the dual-write logic inside storeAuthRecord.
+		// Also write (or update) a thin *-auth JSON record with explicit kind=ApiKey.
+		// This ensures the manual "enter API key" flow produces a first-class kinded record.
+		// Written directly to secrets to avoid recursion with dual-write in storeAuthRecord.
 		const authKey = (authType === BYOKAuthType.PerModelDeployment && modelId)
 			? `copilot-byok-${providerName}-${modelId}-auth`
 			: `copilot-byok-${providerName}-auth`;
@@ -304,8 +315,7 @@ export class BYOKStorageService implements IBYOKStorageService {
 			? `copilot-byok-${providerName}-${modelId}-auth`
 			: `copilot-byok-${providerName}-auth`;
 
-		// Determine the explicit kind for Option 3 clear-choice model.
-		// If the caller provided a kind, respect it (source of truth).
+		// Determine the explicit kind. If the caller provided a kind, respect it.
 		// Otherwise infer from which credential field is populated.
 		let kind = record.kind;
 		if (!kind) {
@@ -323,14 +333,11 @@ export class BYOKStorageService implements IBYOKStorageService {
 		};
 		await this._extensionContext.secrets.store(authKey, JSON.stringify(toStore));
 
-		// Also keep the old-format api-key secret in sync for any code paths that still read it directly
-		// during the transition period. This makes rollback safer.
+		// Dual-write to the original api-key secret slots for compatibility with code paths
+		// that still call getAPIKey / deleteAPIKey directly.
 		if (record.apiKey) {
 			await this.storeAPIKey(providerName, record.apiKey, authType, modelId);
 		} else if (record.accessToken) {
-			// For pure OAuth records, we still write the accessToken into the old-format api-key slot
-			// so that getAPIKey continues to return a usable credential without requiring every caller
-			// to be updated in the same change. This is the key bridge for the xAI PoC.
 			await this.storeAPIKey(providerName, record.accessToken, authType, modelId);
 		}
 	}

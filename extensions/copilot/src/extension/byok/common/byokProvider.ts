@@ -24,8 +24,7 @@ export const enum BYOKAuthType {
 
 /**
  * Discriminator for the authentication method used for a BYOK provider or model.
- * This makes the user's choice between "API key" and "OAuth / access token" first-class
- * and explicit (Option 3 design for clear separation in UI and storage).
+ * This makes the user's choice between "API key" and "OAuth / access token" explicit.
  */
 export const enum BYOKCredentialKind {
 	/**
