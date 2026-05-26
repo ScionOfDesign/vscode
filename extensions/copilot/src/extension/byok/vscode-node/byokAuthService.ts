@@ -25,11 +25,23 @@ export interface BYOKAuthResult {
 /**
  * Minimal interface that per-provider OAuth managers (e.g. XaiAuthManager) implement
  * for delegation from BYOKAuthService. This avoids the service depending on concrete
- * manager classes while still allowing provider-specific device code / refresh logic.
+ * manager classes while still allowing provider-specific sign-in / refresh logic.
  */
 export interface IOAuthManager {
 	signIn(): Promise<BYOKAuthRecord | undefined>;
 	refreshIfNeeded(record: BYOKAuthRecord): Promise<BYOKAuthRecord | undefined>;
+}
+
+/**
+ * Optional base class for OAuth managers.
+ *
+ * Future providers can extend this to inherit common patterns (e.g. token storage
+ * helpers, logging, or scheduled refresh) and only implement the two core methods.
+ * The base is intentionally minimal today.
+ */
+export abstract class OAuthManagerBase implements IOAuthManager {
+	abstract signIn(): Promise<BYOKAuthRecord | undefined>;
+	abstract refreshIfNeeded(record: BYOKAuthRecord): Promise<BYOKAuthRecord | undefined>;
 }
 
 /**
@@ -38,13 +50,13 @@ export interface IOAuthManager {
  *
  * For the xAI PoC (and future OAuth providers), this service (or a provider-specific
  * manager it delegates to) will:
- *  - Perform the OAuth device authorization grant flow (or other OIDC flow)
+ *  - Perform the OAuth authorization code + PKCE flow (or other OIDC flow)
  *  - Proactively refresh expiring tokens before use
  *  - Expose a stable "get credential" API so that AbstractOpenAICompatibleLMProvider
  *    and OpenAIEndpoint can obtain a Bearer token exactly as they currently obtain an API key.
  *
  * The default implementation provides a thin pass-through / migration layer over
- * IBYOKStorageService. Concrete per-provider managers (e.g. XaiOAuthManager) will
+ * IBYOKStorageService. Concrete per-provider managers (e.g. XaiAuthManager) will
  * be composed in later steps.
  */
 export interface IBYOKAuthService {

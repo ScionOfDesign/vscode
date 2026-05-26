@@ -7,23 +7,26 @@ import * as vscode from 'vscode';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { BYOKAuthRecord } from './byokStorageService';
-import { IBYOKAuthService } from './byokAuthService';
+import { IBYOKAuthService, OAuthManagerBase } from './byokAuthService';
 import { BYOKAuthType, BYOKCredentialKind } from '../common/byokProvider';
 import { XaiAuthUriHandler } from './xaiAuthUriHandler';
+import {
+	AuthorizationCodePkceClient,
+	base64UrlEncode,
+	generateCodeChallenge,
+	generateCodeVerifier,
+	OAuthProviderConfig
+} from '../common/oauth';
 
 /**
- * xAI OIDC issuer. We perform mandatory discovery against
- * `${XAI_OIDC_ISSUER}/.well-known/openid-configuration` using the core
- * `fetchAuthorizationServerMetadata` utility (hard fail — no hardcoded fallback).
- *
- * See: src/vs/base/common/oauth.ts
+ * xAI OIDC issuer. Mandatory discovery is performed against
+ * `${XAI_OIDC_ISSUER}/.well-known/openid-configuration` (hard fail, no fallback).
  */
 export const XAI_OIDC_ISSUER = 'https://auth.x.ai';
 
 /**
- * Token endpoint. In the final implementation this will be obtained from
- * OIDC discovery (/.well-known/openid-configuration), but we pin a known-good
- * value for the initial PKCE implementation.
+ * Fallback token endpoint used for refresh (and as safety default).
+ * The primary sign-in flow obtains the real endpoint from OIDC discovery.
  */
 export const XAI_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth2/token';
 
@@ -53,185 +56,32 @@ export const XAI_SCOPES = ['openid', 'profile', 'email', 'offline_access', 'grok
 /** Refresh the token if it expires within this window (5 minutes). */
 export const TOKEN_REFRESH_THRESHOLD_MS = 5 * 60 * 1000;
 
-/** Successful token response (both initial and refresh). */
-export interface XaiTokenResponse {
-	readonly access_token: string;
-	readonly token_type: string;
-	readonly expires_in: number;
-	readonly refresh_token?: string;
-	readonly scope?: string;
-}
-
-/** Error response from token endpoint. */
-export interface XaiTokenErrorResponse {
-	readonly error: string;
-	readonly error_description?: string;
-}
+/**
+ * xAI-specific OAuth provider configuration for the reusable PKCE + OIDC client.
+ */
+const xaiOAuthConfig: OAuthProviderConfig = {
+	issuer: XAI_OIDC_ISSUER,
+	clientId: XAI_CLIENT_ID,
+	scopes: XAI_SCOPES
+};
 
 /**
- * Cryptographic helpers for PKCE (RFC 7636) S256.
+ * Thin OIDC/PKCE client for xAI, built on the reusable AuthorizationCodePkceClient
+ * extracted to ../common/oauth.ts. Future BYOK OAuth providers should use the
+ * generic client (or extend it) instead of copying PKCE + discovery logic.
  */
-async function generateCodeVerifier(): Promise<string> {
-	const array = new Uint8Array(32);
-	crypto.getRandomValues(array);
-	return base64UrlEncode(array);
-}
-
-function base64UrlEncode(buffer: Uint8Array): string {
-	return btoa(String.fromCharCode(...buffer))
-		.replace(/\+/g, '-')
-		.replace(/\//g, '_')
-		.replace(/=+$/, '');
-}
-
-async function generateCodeChallenge(verifier: string): Promise<string> {
-	const encoder = new TextEncoder();
-	const data = encoder.encode(verifier);
-	const digest = await crypto.subtle.digest('SHA-256', data);
-	return base64UrlEncode(new Uint8Array(digest));
-}
-
-/**
- * Pure HTTP + PKCE client for xAI's OAuth2 Authorization Code flow.
- * Performs OIDC discovery and drives the PKCE dance.
- * Does not perform UI or storage operations.
- */
-export class XaiOidcClient {
-	constructor(
-		private readonly _fetcher: IFetcherService,
-		private readonly _logService: ILogService,
-	) { }
-
-	/**
-	 * Performs OIDC discovery against the well-known endpoint.
-	 * Hard fail if discovery does not succeed (no hardcoded fallback).
-	 */
-	async discoverAuthorizationServer(): Promise<{ authorizationEndpoint: string; tokenEndpoint: string }> {
-		const wellKnown = `${XAI_OIDC_ISSUER}/.well-known/openid-configuration`;
-		this._logService.debug(`XaiOidcClient: performing OIDC discovery from ${wellKnown}`);
-
-		const response = await this._fetcher.fetch(wellKnown, {
-			method: 'GET',
-			headers: { 'Accept': 'application/json' },
-			callSite: 'xai-byok-oidc-discovery'
-		});
-
-		if (!response.ok) {
-			const text = await response.text();
-			throw new Error(`OIDC discovery failed (${response.status}): ${text}`);
-		}
-
-		const metadata = await response.json() as {
-			authorization_endpoint?: string;
-			token_endpoint?: string;
-		};
-
-		if (!metadata.authorization_endpoint || !metadata.token_endpoint) {
-			throw new Error('Invalid OIDC discovery document from xAI (missing endpoints)');
-		}
-
-		this._logService.info('XaiOidcClient: OIDC discovery succeeded');
-		return {
-			authorizationEndpoint: metadata.authorization_endpoint,
-			tokenEndpoint: metadata.token_endpoint
-		};
-	}
-
-	/**
-	 * Exchanges an authorization code + PKCE verifier for tokens.
-	 */
-	async exchangeAuthorizationCode(
-		code: string,
-		codeVerifier: string,
-		redirectUri: string,
-		tokenEndpoint: string
-	): Promise<XaiTokenResponse> {
-		const body = new URLSearchParams({
-			grant_type: 'authorization_code',
-			code,
-			redirect_uri: redirectUri,
-			client_id: XAI_CLIENT_ID,
-			code_verifier: codeVerifier
-		}).toString();
-
-		this._logService.debug('XaiOidcClient: exchanging authorization code for tokens');
-
-		const response = await this._fetcher.fetch(tokenEndpoint, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				'Accept': 'application/json'
-			},
-			body,
-			callSite: 'xai-byok-pkce-exchange'
-		});
-
-		if (!response.ok) {
-			const text = await response.text();
-			this._logService.error(`XaiOidcClient: code exchange failed ${response.status}: ${text}`);
-			throw new Error(`Authorization code exchange failed: ${response.status}. Server: ${text}`);
-		}
-
-		const tokenData = await response.json() as XaiTokenResponse;
-		if (!tokenData.access_token || typeof tokenData.expires_in !== 'number') {
-			throw new Error('Invalid token response from xAI');
-		}
-
-		this._logService.info('XaiOidcClient: PKCE authorization code exchange succeeded');
-		return tokenData;
-	}
-
-	/**
-	 * Exchanges a refresh_token for a new access_token.
-	 */
-	async refreshAccessToken(refreshToken: string): Promise<XaiTokenResponse> {
-		const body = new URLSearchParams({
-			grant_type: 'refresh_token',
-			refresh_token: refreshToken,
-			client_id: XAI_CLIENT_ID
-		}).toString();
-
-		this._logService.debug('XaiOidcClient: refreshing access token');
-
-		const response = await this._fetcher.fetch(XAI_TOKEN_ENDPOINT, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				'Accept': 'application/json'
-			},
-			body,
-			callSite: 'xai-byok-refresh'
-		});
-
-		if (!response.ok) {
-			const text = await response.text();
-			this._logService.error(`XaiOidcClient: refresh failed ${response.status}: ${text}`);
-			throw new Error(`Token refresh failed: ${response.status}. Server: ${text}`);
-		}
-
-		const tokenData = await response.json() as XaiTokenResponse;
-		if (!tokenData.access_token || typeof tokenData.expires_in !== 'number') {
-			throw new Error('Invalid refresh response from xAI');
-		}
-
-		this._logService.info('XaiOidcClient: token refresh succeeded');
-		return tokenData;
+export class XaiOidcClient extends AuthorizationCodePkceClient {
+	constructor(fetcher: IFetcherService, logService: ILogService) {
+		super(fetcher, logService, xaiOAuthConfig);
 	}
 }
 
 /**
- * High-level manager for xAI OAuth lifecycle (BYOK).
- *
- * Implements the full VS Code OAuth pattern (Option C):
- * - Mandatory OIDC discovery via /.well-known/openid-configuration (hard fail).
- * - PKCE Authorization Code flow (S256).
- * - Uses XaiAuthUriHandler + vscode.env.asExternalUri for the redirect callback.
- *   This gives correct behavior on local, remote/SSH, and web.
- *
- * The handler must be provided at construction time (obtained via the singleton
- * getXaiAuthUriHandler so that the same instance is used for both dispatch and waiting).
+ * High-level manager for xAI OAuth (BYOK) using PKCE + OIDC discovery.
+ * The XaiAuthUriHandler (singleton) must be supplied for both URI dispatch registration
+ * and waiting for the authorization redirect.
  */
-export class XaiAuthManager {
+export class XaiAuthManager extends OAuthManagerBase {
 	private readonly _oidcClient: XaiOidcClient;
 
 	constructor(
@@ -240,25 +90,15 @@ export class XaiAuthManager {
 		private readonly _logService: ILogService,
 		private readonly _uriHandler: XaiAuthUriHandler,
 	) {
+		super();
 		this._oidcClient = new XaiOidcClient(this._fetcherService, this._logService);
 	}
 
 	/**
-	 * Performs the PKCE + OIDC discovery sign-in flow for xAI.
-	 *
-	 * High-level steps:
-	 * 1. OIDC discovery to learn the real authorization_endpoint.
-	 * 2. Generate PKCE code_verifier + code_challenge (S256).
-	 * 3. Create state + nonce.
-	 * 4. Build authorize URL and run it through asExternalUri (critical for remote/SSH).
-	 * 5. Open the resulting URL.
-	 * 6. Wait for the code via the XaiAuthUriHandler (which receives the vscode:// redirect).
-	 * 7. Exchange the code for tokens using the code_verifier.
-	 * 8. Persist via the auth service.
+	 * Runs the full PKCE Authorization Code + OIDC discovery sign-in for xAI.
+	 * On success, stores the tokens via the BYOK auth service.
 	 */
 	async signIn(): Promise<BYOKAuthRecord | undefined> {
-		const cancellation = new vscode.CancellationTokenSource();
-
 		try {
 			// 1. Discovery (hard fail)
 			const discovered = await this._oidcClient.discoverAuthorizationServer();
@@ -356,8 +196,6 @@ export class XaiAuthManager {
 				vscode.l10n.t('Failed to start xAI sign-in: {0}', String(err))
 			);
 			return undefined;
-		} finally {
-			cancellation.dispose();
 		}
 	}
 
@@ -378,7 +216,9 @@ export class XaiAuthManager {
 		}
 
 		try {
-			const newTokens = await this._oidcClient.refreshAccessToken(record.refreshToken);
+			// Re-discover to obtain current token endpoint (cheap GET; avoids staleness if xAI rotates endpoints).
+			const discovered = await this._oidcClient.discoverAuthorizationServer();
+			const newTokens = await this._oidcClient.refreshAccessToken(record.refreshToken, discovered.tokenEndpoint);
 
 			const newRecord: BYOKAuthRecord = {
 				...record,

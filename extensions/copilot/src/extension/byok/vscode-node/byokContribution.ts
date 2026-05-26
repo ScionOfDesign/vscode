@@ -51,9 +51,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._byokStorageService = new BYOKStorageService(extensionContext);
 		this._byokAuthService = new BYOKAuthService(this._byokStorageService);
 
-		// Register the xAI OAuth manager (PKCE + OIDC discovery).
-		// The handler singleton is used both for URI dispatch (in CopilotDebugCommandContribution)
-		// and for waiting inside the sign-in flow.
+		// xAI OAuth (PKCE + OIDC). Handler singleton shared for dispatch + flow wait.
 		const xaiHandler = getXaiAuthUriHandler(this._logService);
 		const xaiManager = new XaiAuthManager(this._byokAuthService, this._fetcherService, this._logService, xaiHandler);
 		this._byokAuthService.registerOAuthManager('xai', xaiManager);
@@ -108,10 +106,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 
 		this._register(commands.registerCommand('github.copilot.chat.signOutXai', async () => {
 			try {
-				// Confirmation dialog for sign-out (destructive action on stored OAuth tokens).
-				// Explicit "Cancel" button is provided so that dismissing the dialog or choosing
-				// Cancel is clearly not accepted as a sign-out confirmation (only the exact
-				// "Sign Out" button proceeds). Matches VS Code patterns for destructive actions.
+				// Modal confirm for destructive sign-out of stored OAuth tokens.
 				const confirm = await window.showWarningMessage(
 					l10n.t('Sign out of xAI? This will remove your OAuth access tokens for this provider.'),
 					{ modal: true },

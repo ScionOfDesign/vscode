@@ -5,24 +5,17 @@
 
 import * as vscode from 'vscode';
 import { ILogService } from '../../../platform/log/common/logService';
-/**
- * Custom URI handler interface used inside the Copilot extension for sub-dispatching.
- * Matches the pattern established by ChatSessionsUriHandler.
- */
-export type CustomUriHandler = vscode.UriHandler & { canHandleUri(uri: vscode.Uri): boolean };
+import { CustomUriHandler } from '../../chatSessions/vscode/chatSessionsUriHandler';
 
 /**
- * Minimal PromiseAdapter + promiseFromEvent implementation.
- * Vendored here to keep xAI auth self-contained and avoid depending on
- * github-authentication's internal utilities.
+ * Internal adapter + promise helper for waiting on a single VS Code event (e.g. URI callback).
+ * Based on the established pattern in github-authentication and chat sessions.
  */
-export type PromiseAdapter<T, U> = (value: T, resolve: (value: U | PromiseLike<U>) => void, reject: (reason: any) => void) => any;
+type PromiseAdapter<T, U> = (value: T, resolve: (value: U | PromiseLike<U>) => void, reject: (reason: unknown) => void) => unknown;
 
-const passthrough = (value: any, resolve: (value?: any) => void) => resolve(value);
-
-export function promiseFromEvent<T, U>(
+function promiseFromEvent<T, U>(
 	event: vscode.Event<T>,
-	adapter: PromiseAdapter<T, U> = passthrough
+	adapter: PromiseAdapter<T, U>
 ): { promise: Promise<U>; cancel: vscode.EventEmitter<void> } {
 	let subscription: vscode.Disposable;
 	const cancel = new vscode.EventEmitter<void>();
@@ -73,12 +66,10 @@ export function promiseFromEvent<T, U>(
  * It only bridges the browser redirect back into the extension.
  */
 export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implements CustomUriHandler {
-	private readonly _pendingStates = new Map<string, string[]>();
+	private readonly _pendingStates = new Set<string>();
 	private readonly _codeExchangePromises = new Map<string, { promise: Promise<string>; cancel: vscode.EventEmitter<void> }>();
 
-	constructor(
-		@ILogService private readonly _logService: ILogService
-	) {
+	constructor(private readonly _logService: ILogService) {
 		super();
 	}
 
@@ -99,21 +90,12 @@ export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implement
 	}
 
 	/**
-	 * Waits for the OAuth authorization code to arrive via the vscode:// redirect.
-	 *
-	 * The caller (XaiAuthManager) is responsible for:
-	 *  - Generating a cryptographically random `state`
-	 *  - Building the authorize URL with that state (and PKCE params)
-	 *  - Calling asExternalUri on a vscode://github.copilot/xai-auth?state=... URI
-	 *  - Opening the resulting URL in the browser
-	 *  - Passing the same state here
-	 *
-	 * This method will resolve with the `code` from the IdP when the redirect arrives
-	 * and the state matches, or reject on timeout / cancellation / error.
+	 * Waits for the OAuth authorization code (with state validation to mitigate CSRF).
+	 * Resolves with the code on valid redirect, or rejects on timeout/cancel/error.
+	 * 5-minute timeout matches other OAuth flows in the codebase.
 	 */
 	public async waitForAuthorizationCode(state: string, token: vscode.CancellationToken): Promise<string> {
-		const existingStates = this._pendingStates.get(state) || [];
-		this._pendingStates.set(state, [...existingStates, state]);
+		this._pendingStates.add(state);
 
 		let codeExchangePromise = this._codeExchangePromises.get(state);
 		if (!codeExchangePromise) {
@@ -156,25 +138,22 @@ export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implement
 				return;
 			}
 
-			const acceptedStates = this._pendingStates.get(expectedState) || [];
-			if (!acceptedStates.includes(returnedState)) {
+			if (!this._pendingStates.has(returnedState)) {
 				// Another sign-in flow is in progress with a different state.
 				// This is normal if the user triggers multiple flows quickly.
 				this._logService?.info?.('XAI Auth: State mismatch or not the expected pending state. Ignoring this redirect.');
 				return;
 			}
 
+			this._pendingStates.delete(returnedState);
 			resolve(code);
 		};
 }
 
 /**
- * Module-level singleton accessor.
- * Allows both BYOKContrib (to pass to XaiAuthManager) and the debug contribution
- * (for URI dispatch registration) to obtain the same instance without complex DI wiring
- * in the first implementation pass.
- *
- * The instance is lazily created when first requested.
+ * Singleton for the xAI URI handler.
+ * Required because the handler must be registered for URI dispatch (in CopilotDebugCommandContribution)
+ * and also passed to XaiAuthManager (in BYOKContrib). Created lazily on first use.
  */
 let _xaiAuthUriHandler: XaiAuthUriHandler | undefined;
 
