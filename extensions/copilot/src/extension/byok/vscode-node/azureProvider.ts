@@ -15,6 +15,7 @@ import { IInstantiationService } from '../../../util/vs/platform/instantiation/c
 import { resolveModelInfo } from '../common/byokProvider';
 import { AzureOpenAIEndpoint } from '../node/azureOpenAIEndpoint';
 import { OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 import { AbstractCustomOAIBYOKModelProvider, CustomOAIModelProviderConfig, hasExplicitApiPath } from './customOAIProvider';
 
@@ -52,6 +53,7 @@ export class AzureBYOKModelProvider extends AbstractCustomOAIBYOKModelProvider {
 
 	constructor(
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@IConfigurationService configurationService: IConfigurationService,
 		@ILogService logService: ILogService,
 		@IFetcherService fetcherService: IFetcherService,
@@ -63,6 +65,7 @@ export class AzureBYOKModelProvider extends AbstractCustomOAIBYOKModelProvider {
 			AzureBYOKModelProvider.providerId,
 			AzureBYOKModelProvider.providerName,
 			byokStorageService,
+			byokAuthService,
 			logService,
 			fetcherService,
 			instantiationService,

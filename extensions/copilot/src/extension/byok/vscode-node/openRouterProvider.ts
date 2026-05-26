@@ -16,6 +16,7 @@ import { IInstantiationService } from '../../../util/vs/platform/instantiation/c
 import { BYOKModelCapabilities } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 interface OpenRouterModelData {
@@ -37,6 +38,7 @@ export class OpenRouterLMProvider extends AbstractOpenAICompatibleLMProvider {
 
 	constructor(
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@IFetcherService fetcherService: IFetcherService,
 		@ILogService logService: ILogService,
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -48,6 +50,7 @@ export class OpenRouterLMProvider extends AbstractOpenAICompatibleLMProvider {
 			OpenRouterLMProvider.providerName,
 			undefined,
 			byokStorageService,
+			byokAuthService,
 			fetcherService,
 			logService,
 			instantiationService,

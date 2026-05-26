@@ -30,6 +30,7 @@ import { anthropicMessagesToRawMessagesForLogging, apiMessageToAnthropicMessage 
 import { BYOKKnownModels, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
@@ -40,6 +41,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService logService: ILogService,
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
@@ -48,7 +50,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		@IOTelService private readonly _otelService: IOTelService,
 		@IToolDeferralService private readonly _toolDeferralService: IToolDeferralService,
 	) {
-		super(AnthropicLMProvider.providerId, AnthropicLMProvider.providerName, knownModels, byokStorageService, logService);
+		super(AnthropicLMProvider.providerId, AnthropicLMProvider.providerName, knownModels, byokStorageService, byokAuthService, logService);
 
 	}
 

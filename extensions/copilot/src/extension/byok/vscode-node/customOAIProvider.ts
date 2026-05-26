@@ -15,6 +15,7 @@ import { resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelToAPIInfoWithEffort } from './byokModelInfo';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export function resolveCustomOAIUrl(modelId: string, url: string): string {
@@ -76,6 +77,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 		id: string,
 		name: string,
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService logService: ILogService,
 		@IFetcherService fetcherService: IFetcherService,
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -83,7 +85,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 		@IExperimentationService expService: IExperimentationService,
 		@IVSCodeExtensionContext private readonly _extensionContext: IVSCodeExtensionContext
 	) {
-		super(id, name, undefined, byokStorageService, fetcherService, logService, instantiationService, configurationService, expService);
+		super(id, name, undefined, byokStorageService, byokAuthService, fetcherService, logService, instantiationService, configurationService, expService);
 	}
 
 	protected async migrateConfig(configKey: Config<IStringDictionary<_CustomOAIModelConfig>>, providerName: string, providerGroupName: string): Promise<void> {
@@ -173,6 +175,7 @@ export class CustomOAIBYOKModelProvider extends AbstractCustomOAIBYOKModelProvid
 
 	constructor(
 		_byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService logService: ILogService,
 		@IFetcherService fetcherService: IFetcherService,
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -180,7 +183,7 @@ export class CustomOAIBYOKModelProvider extends AbstractCustomOAIBYOKModelProvid
 		@IExperimentationService expService: IExperimentationService,
 		@IVSCodeExtensionContext extensionContext: IVSCodeExtensionContext
 	) {
-		super(CustomOAIBYOKModelProvider.providerId, CustomOAIBYOKModelProvider.providerName, _byokStorageService, logService, fetcherService, instantiationService, configurationService, expService, extensionContext);
+		super(CustomOAIBYOKModelProvider.providerId, CustomOAIBYOKModelProvider.providerName, _byokStorageService, byokAuthService, logService, fetcherService, instantiationService, configurationService, expService, extensionContext);
 		this.migrateExistingConfigs();
 	}
 

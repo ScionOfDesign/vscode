@@ -22,6 +22,24 @@ export const enum BYOKAuthType {
 	None
 }
 
+/**
+ * Discriminator for the authentication method used for a BYOK provider or model.
+ * This makes the user's choice between "API key" and "OAuth / access token" first-class
+ * and explicit (Option 3 design for clear separation in UI and storage).
+ */
+export const enum BYOKCredentialKind {
+	/**
+	 * Traditional long-lived API key entered manually by the user.
+	 */
+	ApiKey = 'api-key',
+
+	/**
+	 * OAuth-based access token (with optional refresh token and expiry),
+	 * obtained via a provider-specific sign-in flow (e.g. xAI device code).
+	 */
+	OAuth = 'oauth'
+}
+
 interface BYOKBaseModelConfig {
 	modelId: string;
 	capabilities?: BYOKModelCapabilities;

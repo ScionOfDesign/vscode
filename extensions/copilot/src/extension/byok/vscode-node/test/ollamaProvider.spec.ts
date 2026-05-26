@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { OllamaLMProvider } from '../ollamaProvider';
+import type { IBYOKAuthService } from '../byokAuthService';
 
 describe('OllamaLMProvider', () => {
 	it('returns successful models when one /api/show lookup fails', async () => {
@@ -57,6 +58,17 @@ describe('OllamaLMProvider', () => {
 		logService.createSubLogger.mockReturnValue(logService);
 		logService.withExtraTarget.mockReturnValue(logService);
 
+		const authService: IBYOKAuthService = {
+			onDidChange: (() => { }) as any,
+			getValidCredential: vi.fn().mockResolvedValue(undefined),
+			getAuthRecord: vi.fn().mockResolvedValue(undefined),
+			refreshIfNeeded: vi.fn().mockResolvedValue(undefined),
+			signInWithOAuth: vi.fn().mockResolvedValue(undefined),
+			signOut: vi.fn().mockResolvedValue(undefined),
+			storeAuthRecord: vi.fn().mockResolvedValue(undefined),
+			registerOAuthManager: vi.fn(),
+		};
+
 		const provider = new OllamaLMProvider(
 			{
 				getAPIKey: vi.fn().mockResolvedValue(undefined),
@@ -65,7 +77,11 @@ describe('OllamaLMProvider', () => {
 				getStoredModelConfigs: vi.fn().mockResolvedValue({}),
 				saveModelConfig: vi.fn().mockResolvedValue(undefined),
 				removeModelConfig: vi.fn().mockResolvedValue(undefined),
+				getAuthRecord: vi.fn().mockResolvedValue(undefined),
+				storeAuthRecord: vi.fn().mockResolvedValue(undefined),
+				deleteAuthRecord: vi.fn().mockResolvedValue(undefined),
 			} as any,
+			authService,
 			{ fetch } as any,
 			{
 				isConfigured: vi.fn().mockReturnValue(false),

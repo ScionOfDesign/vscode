@@ -2,19 +2,21 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { LanguageModelChatInformation, LanguageModelChatProvider, lm } from 'vscode';
+import { commands, LanguageModelChatInformation, LanguageModelChatProvider, l10n, lm, window } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { Disposable, DisposableStore } from '../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { BYOKKnownModels, isClientBYOKAllowed } from '../../byok/common/byokProvider';
+import { BYOKAuthType, BYOKKnownModels, isClientBYOKAllowed } from '../../byok/common/byokProvider';
 import { IExtensionContribution } from '../../common/contributions';
 import { AbstractLanguageModelChatProvider } from './abstractLanguageModelChatProvider';
 import { AnthropicLMProvider } from './anthropicProvider';
 import { AzureBYOKModelProvider } from './azureProvider';
+import { BYOKAuthService, IBYOKAuthService } from './byokAuthService';
 import { BYOKStorageService, IBYOKStorageService } from './byokStorageService';
+import { XaiAuthManager } from './xaiAuthManager';
 import { CustomEndpointBYOKModelProvider } from './customEndpointProvider';
 import { CustomOAIBYOKModelProvider } from './customOAIProvider';
 import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
@@ -26,6 +28,11 @@ import { XAIBYOKLMProvider } from './xAIProvider';
 export class BYOKContrib extends Disposable implements IExtensionContribution {
 	public readonly id: string = 'byok-contribution';
 	private readonly _byokStorageService: IBYOKStorageService;
+	private readonly _byokAuthService: IBYOKAuthService;
+
+	/** Exposes the unified auth service (supports both API keys and OAuth tokens) for commands and other consumers. */
+	public get byokAuthService(): IBYOKAuthService { return this._byokAuthService; }
+
 	private readonly _providers: Map<string, LanguageModelChatProvider<LanguageModelChatInformation>> = new Map();
 	private readonly _providerRegistrations = this._register(new DisposableStore());
 	private _providersRegistered = false;
@@ -41,27 +48,101 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 	) {
 		super();
 		this._byokStorageService = new BYOKStorageService(extensionContext);
+		this._byokAuthService = new BYOKAuthService(this._byokStorageService);
+
+		// PoC: register the xAI OAuth manager (device code flow + proactive refresh).
+		// Future providers will follow the same pattern.
+		const xaiManager = new XaiAuthManager(this._byokAuthService, this._fetcherService, this._logService);
+		this._byokAuthService.registerOAuthManager('xai', xaiManager);
+
 		this._applyPolicy();
 		this._register(this._authService.onDidAuthenticationChange(() => this._applyPolicy()));
+		this._register(this._byokAuthService.onDidChange(e => {
+			this._logService.info(`BYOK: auth changed for provider ${e.providerName}${e.modelId ? ` (model ${e.modelId})` : ''}`);
+		}));
+
+		// Register differentiated xAI OAuth commands (PoC). These are enabled via when-clauses in package.json.
+		// The handlers delegate to the unified auth service, which routes to XaiAuthManager for the device code flow.
+		this._register(commands.registerCommand('github.copilot.chat.signInXai', async () => {
+			try {
+				await this._byokAuthService.signInWithOAuth(XAIBYOKLMProvider.authProviderName);
+
+				// PoC robustness: after successful OAuth sign-in, ensure the xAI provider is registered
+				// (in case sign-in command was invoked before _applyPolicy built providers), then
+				// directly trigger the migrate for the distinct "xAI (OAuth)" group. This decouples
+				// persistence (chatLanguageModels.json) from the provider's onDidChange listener timing.
+				// The user explicitly requested an 'xAI (OAuth)' option in the model provider list.
+				this._applyPolicy();
+				const cred = await this._byokAuthService.getValidCredential(XAIBYOKLMProvider.authProviderName);
+				if (cred) {
+					this._logService.info('BYOK: xAI OAuth sign-in succeeded; triggering migrate for "xAI (OAuth)" group');
+					try {
+						await commands.executeCommand('lm.migrateLanguageModelsProviderGroup', {
+							vendor: XAIBYOKLMProvider.providerId,
+							name: 'xAI (OAuth)',
+							apiKey: cred
+						});
+						this._logService.info('BYOK: lm.migrateLanguageModelsProviderGroup completed for xAI (OAuth)');
+					} catch (migrateErr) {
+						const msg = migrateErr instanceof Error ? migrateErr.message : String(migrateErr);
+						// Treat "already exists" as success for the PoC (idempotent add after sign-in).
+						// This can happen if the user re-runs the command, or after a rename/delete
+						// left a stale group, or due to timing with the (now-silent) listener path.
+						if (msg.includes('already exists in provider group')) {
+							this._logService.info(`BYOK: migrate for xAI (OAuth) skipped (group already present): ${msg}`);
+						} else {
+							this._logService.error('BYOK: migrate for xAI (OAuth) failed', msg);
+							void window.showWarningMessage(l10n.t('xAI OAuth sign-in succeeded, but adding the model provider group failed.'));
+						}
+					}
+				} else {
+					this._logService.warn('BYOK: xAI OAuth sign-in reported success but no credential available for migrate');
+				}
+			} catch (err) {
+				this._logService.error('BYOK: xAI sign-in command failed', err instanceof Error ? err.message : String(err));
+			}
+		}));
+
+		this._register(commands.registerCommand('github.copilot.chat.signOutXai', async () => {
+			try {
+				// Confirmation dialog for sign-out (destructive action on stored OAuth tokens).
+				// Explicit "Cancel" button is provided so that dismissing the dialog or choosing
+				// Cancel is clearly not accepted as a sign-out confirmation (only the exact
+				// "Sign Out" button proceeds). Matches VS Code patterns for destructive actions.
+				const confirm = await window.showWarningMessage(
+					l10n.t('Sign out of xAI? This will remove your OAuth access tokens for this provider.'),
+					{ modal: true },
+					l10n.t('Sign Out'),
+					l10n.t('Cancel')
+				);
+				if (confirm === l10n.t('Sign Out')) {
+					await this._byokAuthService.signOut(XAIBYOKLMProvider.authProviderName, BYOKAuthType.GlobalApiKey);
+				}
+			} catch (err) {
+				this._logService.error('BYOK: xAI sign-out command failed', err instanceof Error ? err.message : String(err));
+			}
+		}));
 	}
 
 	private _buildProviders(): void {
 		const instantiationService = this._instantiationService;
 
-		const anthropic = instantiationService.createInstance(AnthropicLMProvider, undefined, this._byokStorageService);
-		const gemini = instantiationService.createInstance(GeminiNativeBYOKLMProvider, undefined, this._byokStorageService);
-		const xai = instantiationService.createInstance(XAIBYOKLMProvider, {}, this._byokStorageService);
-		const openai = instantiationService.createInstance(OAIBYOKLMProvider, {}, this._byokStorageService);
+		// All BYOK providers receive the unified auth service (supports both API key and OAuth credentials).
+		// The auth service is always provided; it delegates to storage for API-key-only flows.
+		const anthropic = instantiationService.createInstance(AnthropicLMProvider, undefined, this._byokStorageService, this._byokAuthService);
+		const gemini = instantiationService.createInstance(GeminiNativeBYOKLMProvider, undefined, this._byokStorageService, this._byokAuthService);
+		const xai = instantiationService.createInstance(XAIBYOKLMProvider, {}, this._byokStorageService, this._byokAuthService, XAIBYOKLMProvider.authProviderName);
+		const openai = instantiationService.createInstance(OAIBYOKLMProvider, {}, this._byokStorageService, this._byokAuthService);
 
-		this._providers.set(OllamaLMProvider.providerId, instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
+		this._providers.set(OllamaLMProvider.providerId, instantiationService.createInstance(OllamaLMProvider, this._byokStorageService, this._byokAuthService));
 		this._providers.set(AnthropicLMProvider.providerId, anthropic);
 		this._providers.set(GeminiNativeBYOKLMProvider.providerId, gemini);
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(OAIBYOKLMProvider.providerId, openai);
-		this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
-		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
-		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
-		this._providers.set(CustomEndpointBYOKModelProvider.providerId, instantiationService.createInstance(CustomEndpointBYOKModelProvider, this._byokStorageService));
+		this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService, this._byokAuthService));
+		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService, this._byokAuthService));
+		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService, this._byokAuthService));
+		this._providers.set(CustomEndpointBYOKModelProvider.providerId, instantiationService.createInstance(CustomEndpointBYOKModelProvider, this._byokStorageService, this._byokAuthService));
 
 		this._knownModelsRefreshTargets = [
 			[AnthropicLMProvider.providerName, anthropic],

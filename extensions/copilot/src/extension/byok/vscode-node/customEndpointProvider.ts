@@ -17,6 +17,7 @@ import { resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelToAPIInfoWithEffort } from './byokModelInfo';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export type CustomEndpointApiType = 'chat-completions' | 'responses' | 'messages';
@@ -114,13 +115,14 @@ export class CustomEndpointBYOKModelProvider extends AbstractOpenAICompatibleLMP
 
 	constructor(
 		_byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService logService: ILogService,
 		@IFetcherService fetcherService: IFetcherService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IConfigurationService configurationService: IConfigurationService,
 		@IExperimentationService expService: IExperimentationService,
 	) {
-		super(CustomEndpointBYOKModelProvider.providerId, CustomEndpointBYOKModelProvider.providerName, undefined, _byokStorageService, fetcherService, logService, instantiationService, configurationService, expService);
+		super(CustomEndpointBYOKModelProvider.providerId, CustomEndpointBYOKModelProvider.providerName, undefined, _byokStorageService, byokAuthService, fetcherService, logService, instantiationService, configurationService, expService);
 	}
 
 	protected override async configureDefaultGroupWithApiKeyOnly(): Promise<string | undefined> {

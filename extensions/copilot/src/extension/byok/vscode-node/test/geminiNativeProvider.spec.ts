@@ -11,6 +11,7 @@ import type { IRequestLogger } from '../../../../platform/requestLogger/common/r
 import { NullTelemetryService } from '../../../../platform/telemetry/common/nullTelemetryService';
 import { TestLogService } from '../../../../platform/testing/common/testLogService';
 import type { IBYOKStorageService } from '../byokStorageService';
+import type { IBYOKAuthService } from '../byokAuthService';
 
 const mockHandleAPIKeyUpdate = vi.fn();
 
@@ -71,6 +72,25 @@ function createStorageService(overrides?: Partial<IBYOKStorageService>): IBYOKSt
 		getStoredModelConfigs: vi.fn().mockResolvedValue({}),
 		saveModelConfig: vi.fn().mockResolvedValue(undefined),
 		removeModelConfig: vi.fn().mockResolvedValue(undefined),
+		// New OAuth-capable methods (Phase 1). Tests currently only exercise API key path.
+		getAuthRecord: vi.fn().mockResolvedValue(undefined),
+		storeAuthRecord: vi.fn().mockResolvedValue(undefined),
+		deleteAuthRecord: vi.fn().mockResolvedValue(undefined),
+		...overrides,
+	};
+}
+
+function createAuthService(overrides?: Partial<IBYOKAuthService>): IBYOKAuthService {
+	const emitter = new vscode.EventEmitter<{ providerName: string; modelId?: string }>();
+	return {
+		onDidChange: emitter.event,
+		getValidCredential: vi.fn().mockResolvedValue(undefined),
+		getAuthRecord: vi.fn().mockResolvedValue(undefined),
+		refreshIfNeeded: vi.fn().mockResolvedValue(undefined),
+		signInWithOAuth: vi.fn().mockResolvedValue(undefined),
+		signOut: vi.fn().mockResolvedValue(undefined),
+		storeAuthRecord: vi.fn().mockResolvedValue(undefined),
+		registerOAuthManager: vi.fn(),
 		...overrides,
 	};
 }
@@ -105,7 +125,8 @@ describe('GeminiNativeBYOKLMProvider', () => {
 	it.skip('throws a clear error when no API key is configured (no silent return)', async () => {
 		const { GeminiNativeBYOKLMProvider } = await import('../geminiNativeProvider');
 		const storage = createStorageService({ getAPIKey: vi.fn().mockResolvedValue(undefined) });
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const auth = createAuthService();
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, auth, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 
 		const model: vscode.LanguageModelChatInformation = {
 			id: 'gemini-2.0-flash',
@@ -235,7 +256,7 @@ describe('GeminiNativeBYOKLMProvider', () => {
 
 		mockHandleAPIKeyUpdate.mockResolvedValue({ apiKey: undefined, deleted: false, cancelled: true });
 
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, createAuthService(), new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 
@@ -281,7 +302,7 @@ describe('GeminiNativeBYOKLMProvider', () => {
 			}
 		};
 
-		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, createAuthService({ getValidCredential: vi.fn().mockResolvedValue('k_new') }), new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 

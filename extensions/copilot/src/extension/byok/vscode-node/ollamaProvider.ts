@@ -13,6 +13,7 @@ import { resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 interface OllamaModelInfoAPIResponse {
@@ -47,6 +48,7 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 
 	constructor(
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@IFetcherService fetcherService: IFetcherService,
 		@IConfigurationService configurationService: IConfigurationService,
 		@ILogService logService: ILogService,
@@ -58,6 +60,7 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 			OllamaLMProvider.providerName,
 			undefined,
 			byokStorageService,
+			byokAuthService,
 			fetcherService,
 			logService,
 			instantiationService,

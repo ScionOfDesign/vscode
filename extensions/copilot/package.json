@@ -2340,6 +2340,16 @@
         "title": "%github.copilot.command.triggerPermissiveSignIn%"
       },
       {
+        "command": "github.copilot.chat.signInXai",
+        "title": "%github.copilot.command.signInXai%",
+        "category": "Chat"
+      },
+      {
+        "command": "github.copilot.chat.signOutXai",
+        "title": "%github.copilot.command.signOutXai%",
+        "category": "Chat"
+      },
+      {
         "command": "copilot.claude.agents",
         "title": "Manage Agents",
         "category": "Claude Agent"
@@ -5428,6 +5438,14 @@
         {
           "command": "github.copilot.chat.triggerPermissiveSignIn",
           "when": "false"
+        },
+        {
+          "command": "github.copilot.chat.signInXai",
+          "when": "github.copilot-chat.activated"
+        },
+        {
+          "command": "github.copilot.chat.signOutXai",
+          "when": "github.copilot-chat.activated"
         },
         {
           "command": "github.copilot.interactiveSession.feedback",

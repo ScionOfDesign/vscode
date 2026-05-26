@@ -10,6 +10,7 @@ import { IExperimentationService } from '../../../platform/telemetry/common/null
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { BYOKKnownModels } from '../common/byokProvider';
 import { AbstractOpenAICompatibleLMProvider } from './abstractLanguageModelChatProvider';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export class OAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
@@ -20,6 +21,7 @@ export class OAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	constructor(
 		knownModels: BYOKKnownModels,
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@IFetcherService fetcherService: IFetcherService,
 		@ILogService logService: ILogService,
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -31,6 +33,7 @@ export class OAIBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 			OAIBYOKLMProvider.providerName,
 			knownModels,
 			byokStorageService,
+			byokAuthService,
 			fetcherService,
 			logService,
 			instantiationService,

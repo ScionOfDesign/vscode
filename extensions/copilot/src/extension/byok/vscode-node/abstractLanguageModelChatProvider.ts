@@ -15,6 +15,7 @@ import { CopilotLanguageModelWrapper } from '../../conversation/vscode-node/lang
 import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities, resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export interface LanguageModelChatConfiguration {
@@ -27,13 +28,17 @@ export interface ExtendedLanguageModelChatInformation<C extends LanguageModelCha
 
 export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelChatConfiguration = LanguageModelChatConfiguration, T extends ExtendedLanguageModelChatInformation<C> = ExtendedLanguageModelChatInformation<C>> implements LanguageModelChatProvider<T> {
 
+	protected readonly _byokAuthService: IBYOKAuthService;
+
 	constructor(
 		protected readonly _id: string,
 		protected readonly _name: string,
 		protected _knownModels: BYOKKnownModels | undefined,
 		protected readonly _byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService protected readonly _logService: ILogService,
 	) {
+		this._byokAuthService = byokAuthService;
 		this.configureDefaultGroupWithApiKeyOnly();
 	}
 
@@ -46,16 +51,29 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 
 	// TODO: Remove this after 6 months
 	protected async configureDefaultGroupWithApiKeyOnly(): Promise<string | undefined> {
-		const apiKey = await this._byokStorageService.getAPIKey(this._name);
-		if (apiKey) {
-			this.configureDefaultGroupIfExists(this._name, { apiKey } as C);
-			await this._byokStorageService.deleteAPIKey(this._name, BYOKAuthType.GlobalApiKey);
+		const credential = await this._getCredential(this._name);
+		if (credential) {
+			this.configureDefaultGroupIfExists(this._name, { apiKey: credential } as C);
+			// Only delete the direct api-key secret slot if we have an auth record managing credentials separately.
+			// The auth service owns the unified credential lifecycle; direct api-key secrets are a compatibility bridge.
+			const authRecord = await this._byokAuthService.getAuthRecord(this._name);
+			if (!authRecord) {
+				await this._byokStorageService.deleteAPIKey(this._name, BYOKAuthType.GlobalApiKey);
+			}
 		}
-		return apiKey;
+		return credential;
 	}
 
 	protected async configureDefaultGroupIfExists(name: string, configuration: C): Promise<void> {
 		await commands.executeCommand('lm.migrateLanguageModelsProviderGroup', { vendor: this._id, name, ...configuration });
+	}
+
+	/**
+	 * Unified credential lookup via the BYOK auth service.
+	 * The auth service unifies access to both API key credentials and OAuth access tokens.
+	 */
+	protected async _getCredential(providerName: string, modelId?: string): Promise<string | undefined> {
+		return this._byokAuthService.getValidCredential(providerName, modelId);
 	}
 
 	async provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {
@@ -89,13 +107,14 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 		name: string,
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@IFetcherService protected readonly _fetcherService: IFetcherService,
 		logService: ILogService,
 		@IInstantiationService protected readonly _instantiationService: IInstantiationService,
 		@IConfigurationService protected readonly _configurationService: IConfigurationService,
 		@IExperimentationService protected readonly _expService: IExperimentationService
 	) {
-		super(id, name, knownModels, byokStorageService, logService);
+		super(id, name, knownModels, byokStorageService, byokAuthService, logService);
 		this._lmWrapper = this._instantiationService.createInstance(CopilotLanguageModelWrapper);
 	}
 

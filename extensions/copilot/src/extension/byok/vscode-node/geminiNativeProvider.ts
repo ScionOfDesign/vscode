@@ -23,6 +23,7 @@ import { BYOKKnownModels, byokKnownModelsToAPIInfo, BYOKModelCapabilities, LMRes
 import { toGeminiFunction as toGeminiFunctionDeclaration, ToolJsonSchema } from '../common/geminiFunctionDeclarationConverter';
 import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from '../common/geminiMessageConverter';
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
+import { IBYOKAuthService } from './byokAuthService';
 import { IBYOKStorageService } from './byokStorageService';
 
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
@@ -33,12 +34,13 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
+		byokAuthService: IBYOKAuthService,
 		@ILogService logService: ILogService,
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IOTelService private readonly _otelService: IOTelService,
 	) {
-		super(GeminiNativeBYOKLMProvider.providerId, GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);
+		super(GeminiNativeBYOKLMProvider.providerId, GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, byokAuthService, logService);
 	}
 
 	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
