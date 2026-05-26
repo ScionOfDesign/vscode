@@ -6,16 +6,6 @@
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { ILogService } from '../../../platform/log/common/logService';
 
-// HTTP method, header, and callSite constants for the OAuth/OIDC client.
-const OIDC_WELL_KNOWN_PATH = '/.well-known/openid-configuration';
-const CONTENT_TYPE_FORM_URLENCODED = 'application/x-www-form-urlencoded';
-const ACCEPT_JSON = 'application/json';
-const CALL_SITE_OIDC_DISCOVERY = 'byok-oidc-discovery';
-const CALL_SITE_PKCE_EXCHANGE = 'byok-pkce-exchange';
-const CALL_SITE_REFRESH = 'byok-refresh';
-const METHOD_GET = 'GET';
-const METHOD_POST = 'POST';
-
 /**
  * Successful token response (both initial authorization code exchange and refresh).
  */
@@ -87,13 +77,13 @@ export class AuthorizationCodePkceClient {
 	 * Returns the authorization and token endpoints from the metadata.
 	 */
 	async discoverAuthorizationServer(): Promise<{ authorizationEndpoint: string; tokenEndpoint: string }> {
-		const wellKnown = `${this._provider.issuer}${OIDC_WELL_KNOWN_PATH}`;
+		const wellKnown = `${this._provider.issuer}/.well-known/openid-configuration`;
 		this._logService.debug(`AuthorizationCodePkceClient: performing OIDC discovery from ${wellKnown}`);
 
 		const response = await this._fetcher.fetch(wellKnown, {
-			method: METHOD_GET,
-			headers: { 'Accept': ACCEPT_JSON },
-			callSite: CALL_SITE_OIDC_DISCOVERY
+			method: 'GET',
+			headers: { 'Accept': 'application/json' },
+			callSite: 'byok-oidc-discovery'
 		});
 
 		if (!response.ok) {
@@ -137,13 +127,13 @@ export class AuthorizationCodePkceClient {
 		this._logService.debug('AuthorizationCodePkceClient: exchanging authorization code for tokens');
 
 		const response = await this._fetcher.fetch(tokenEndpoint, {
-			method: METHOD_POST,
+			method: 'POST',
 			headers: {
-				'Content-Type': CONTENT_TYPE_FORM_URLENCODED,
-				'Accept': ACCEPT_JSON
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'Accept': 'application/json'
 			},
 			body,
-			callSite: CALL_SITE_PKCE_EXCHANGE
+			callSite: 'byok-pkce-exchange'
 		});
 
 		if (!response.ok) {
@@ -176,13 +166,13 @@ export class AuthorizationCodePkceClient {
 		this._logService.debug('AuthorizationCodePkceClient: refreshing access token');
 
 		const response = await this._fetcher.fetch(tokenEndpoint, {
-			method: METHOD_POST,
+			method: 'POST',
 			headers: {
-				'Content-Type': CONTENT_TYPE_FORM_URLENCODED,
-				'Accept': ACCEPT_JSON
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'Accept': 'application/json'
 			},
 			body,
-			callSite: CALL_SITE_REFRESH
+			callSite: 'byok-refresh'
 		});
 
 		if (!response.ok) {
