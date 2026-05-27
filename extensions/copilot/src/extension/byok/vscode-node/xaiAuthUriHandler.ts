@@ -91,6 +91,7 @@ export class XaiAuthUriHandler extends vscode.EventEmitter<vscode.Uri> implement
 	 * Fires the event so any waitForAuthorizationCode listeners can react.
 	 */
 	public handleUri(uri: vscode.Uri): vscode.ProviderResult<void> {
+		this._logService.info(`XaiAuthUriHandler: received redirect for xAI auth: ${uri.toString(true)}`);
 		this.fire(uri);
 	}
 

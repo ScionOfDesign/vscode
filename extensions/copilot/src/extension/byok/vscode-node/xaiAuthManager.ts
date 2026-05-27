@@ -10,6 +10,7 @@ import { BYOKAuthRecord } from './byokStorageService';
 import { IBYOKAuthService, OAuthManagerBase } from './byokAuthService';
 import { BYOKAuthType, BYOKCredentialKind } from '../common/byokProvider';
 import { XaiAuthUriHandler } from './xaiAuthUriHandler';
+import { XaiLoopbackServer } from './xaiLoopbackServer';
 import {
 	AuthorizationCodePkceClient,
 	base64UrlEncode,
@@ -37,10 +38,15 @@ export const XAI_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth2/token';
  * xAI clients today. xAI has not yet provided a dedicated client registration
  * for VS Code + GitHub Copilot with custom redirect URIs, branding, and policy.
  *
- * When a dedicated client becomes available:
- *  - We can switch the redirect target to a pure `vscode://github.copilot/xai-auth` URI
- *    (currently we still use loopback for the shared client allowlist).
- *  - We may be able to request a more appropriate scope set.
+ * We use a local loopback redirect (http://127.0.0.1:<random>/callback) for the
+ * authorization code. This works with the shared client_id today without any
+ * vscode:// or code-oss:// redirect URIs having to be registered by xAI.
+ *
+ * TEMPORARY WORKAROUND: Loopback is used only because xAI currently restricts
+ * the shared public client to http(s) redirects (no custom schemes such as
+ * vscode://, code-oss://, etc. are registered). Once xAI adds support for
+ * proper registered redirect URIs (https or the github.copilot/xai-auth path),
+ * we will switch to the XaiAuthUriHandler + asExternalUri flow.
  *
  * Do not change this value without coordinating with xAI.
  */
@@ -78,8 +84,14 @@ export class XaiOidcClient extends AuthorizationCodePkceClient {
 
 /**
  * High-level manager for xAI OAuth (BYOK) using PKCE + OIDC discovery.
- * The XaiAuthUriHandler (singleton) must be supplied for both URI dispatch registration
- * and waiting for the authorization redirect.
+ *
+ * TEMPORARY: We currently use a local loopback HTTP server
+ * (http://127.0.0.1:port/callback) because xAI only allows http(s) redirects
+ * for the shared public client_id (custom schemes like vscode:// etc. are
+ * not yet registered). The XaiAuthUriHandler + asExternalUri path is the
+ * intended long-term "proper" flow and the handler remains registered.
+ *
+ * See the commented FUTURE block in signIn() for the URL to swap in.
  */
 export class XaiAuthManager extends OAuthManagerBase {
 	private readonly _oidcClient: XaiOidcClient;
@@ -88,9 +100,10 @@ export class XaiAuthManager extends OAuthManagerBase {
 		private readonly _authService: IBYOKAuthService,
 		private readonly _fetcherService: IFetcherService,
 		private readonly _logService: ILogService,
-		private readonly _uriHandler: XaiAuthUriHandler,
+		private readonly _uriHandler: XaiAuthUriHandler, // kept only for call-site compatibility; not used in current loopback flow
 	) {
 		super();
+		void this._uriHandler; // intentionally unused for now (loopback redirect does not require the custom URI handler)
 		this._oidcClient = new XaiOidcClient(this._fetcherService, this._logService);
 	}
 
@@ -107,32 +120,45 @@ export class XaiAuthManager extends OAuthManagerBase {
 			const codeVerifier = await generateCodeVerifier();
 			const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-			// 3. State for CSRF protection (must match what the handler validates)
+			// 3. State + nonce for CSRF / OIDC protection.
+			// TEMPORARY WORKAROUND: loopback redirect while xAI only permits http(s)
+			// redirects for this shared public client_id. Custom scheme redirects
+			// (vscode://github.copilot/xai-auth etc.) are not yet supported by xAI.
 			const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
+			const nonce = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
 
-			// 4. Build the callback URI that the IdP will redirect to after consent.
-			// We use the vscode:// form; asExternalUri will rewrite it appropriately
-			// for the current environment (local / remote / web).
-			const callbackUri = vscode.Uri.parse(
-				`${vscode.env.uriScheme}://github.copilot/xai-auth?state=${encodeURIComponent(state)}`
-			);
+			// 4. Start a minimal local HTTP server on a random port. This is the redirect target
+			// the browser will be sent to after the user consents on xAI.
+			const server = new XaiLoopbackServer(msg => this._logService.info(`XaiLoopback: ${msg}`));
+			server.setExpectedState(state);
+			const port = await server.start();
 
-			const redirectUri = (await vscode.env.asExternalUri(callbackUri)).toString(true);
+			// FUTURE (swap this in once xAI registers proper http(s) or scheme redirects):
+			// const redirectUri = (await vscode.env.asExternalUri(
+			// 	vscode.Uri.parse(`${vscode.env.uriScheme}://github.copilot/xai-auth`)
+			// )).toString(true).replace(/\/$/, '');
+			const redirectUri = `http://127.0.0.1:${port}/callback`;
 
-			// 5. Build the authorization request URL
+			this._logService.info(`XaiAuthManager: using redirect_uri for xAI: ${redirectUri}`);
+
+			// 5. Build the authorization request URL (using the discovered endpoint)
 			const authUrl = new URL(discovered.authorizationEndpoint);
 			authUrl.searchParams.set('response_type', 'code');
 			authUrl.searchParams.set('client_id', XAI_CLIENT_ID);
 			authUrl.searchParams.set('redirect_uri', redirectUri);
 			authUrl.searchParams.set('scope', XAI_SCOPES.join(' '));
 			authUrl.searchParams.set('state', state);
+			authUrl.searchParams.set('nonce', nonce);
 			authUrl.searchParams.set('code_challenge', codeChallenge);
 			authUrl.searchParams.set('code_challenge_method', 'S256');
 
-			// 6. Open the (possibly rewritten) URL in the browser
-			await vscode.env.openExternal(vscode.Uri.parse(authUrl.toString()));
+			const finalAuthUrl = authUrl.toString();
+			this._logService.info(`XaiAuthManager: opening browser for xAI consent: ${finalAuthUrl}`);
 
-			// 7. Wait for the authorization code to arrive via our handler
+			// 6. Open the browser. xAI will redirect the browser to the loopback URL with the code.
+			await vscode.env.openExternal(vscode.Uri.parse(finalAuthUrl));
+
+			// 7. Wait for the local server to receive the callback (or cancellation/timeout)
 			const code = await vscode.window.withProgress<string | undefined>(
 				{
 					location: vscode.ProgressLocation.Notification,
@@ -142,17 +168,54 @@ export class XaiAuthManager extends OAuthManagerBase {
 				async (progress, token) => {
 					progress.report({ message: vscode.l10n.t('Waiting for authorization in the browser...') });
 
+					const timeoutPromise = new Promise<never>((_, reject) =>
+						setTimeout(() => reject(new Error('Timed out waiting for xAI authorization')), 5 * 60 * 1000));
+
+					const cancelPromise = new Promise<never>((_, reject) => {
+						if (token.isCancellationRequested) {
+							reject(new Error('Cancelled'));
+						} else {
+							token.onCancellationRequested(() => {
+								void server.stop();
+								reject(new Error('Cancelled by user'));
+							});
+						}
+					});
+
 					try {
-						return await this._uriHandler.waitForAuthorizationCode(state, token);
+						const result = await Promise.race([
+							server.waitForOAuthResponse(),
+							timeoutPromise,
+							cancelPromise
+						]);
+						return result.code;
 					} catch (err) {
 						if (token.isCancellationRequested) {
 							return undefined;
 						}
+
 						this._logService.error('XaiAuthManager: failed waiting for authorization code', String(err));
+
+						// Recovery path for the exact symptom the user saw:
+						// xAI showed "Could not establish connection. We couldn't reach your app."
+						// and offered a manual code to paste. Offer an input box so the user can
+						// still complete sign-in without having to restart the whole flow.
+						const manualCode = await vscode.window.showInputBox({
+							prompt: vscode.l10n.t('xAI could not reach the local redirect. Paste the authorization code shown on the xAI page (or leave empty to cancel)'),
+							placeHolder: 'Paste the long code from the "Could not establish connection" page',
+							ignoreFocusOut: true
+						});
+						if (manualCode && manualCode.trim()) {
+							this._logService.info('XaiAuthManager: using manually pasted authorization code as fallback');
+							return manualCode.trim();
+						}
+
 						await vscode.window.showErrorMessage(
 							vscode.l10n.t('Failed to sign in to xAI: {0}', String(err))
 						);
 						return undefined;
+					} finally {
+						await server.stop().catch(() => { /* best effort */ });
 					}
 				}
 			);
@@ -162,6 +225,7 @@ export class XaiAuthManager extends OAuthManagerBase {
 			}
 
 			// 8. Exchange the code for tokens (PKCE)
+			// Must pass the exact same redirect_uri that was used in the authorize request.
 			const tokenResp = await this._oidcClient.exchangeAuthorizationCode(
 				code,
 				codeVerifier,
