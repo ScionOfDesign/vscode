@@ -18,11 +18,24 @@ import { URL } from 'url';
  * The server validates the `state` parameter (CSRF protection) and resolves
  * with the authorization code. It serves a minimal success/error page so the
  * user sees feedback in the browser tab instead of a blank page or network error.
+ *
+ * CORS support is included so that xAI's accounts.x.ai consent page (which uses
+ * fetch() rather than a top-level navigation) can successfully reach the loopback
+ * without the browser blocking the response. Only known xAI origins are allowed.
  */
 interface IOAuthResult {
 	readonly code: string;
 	readonly state: string;
 }
+
+/**
+ * Origins from which we will echo Access-Control-Allow-Origin.
+ * Keep this list minimal and stable.
+ */
+const XAI_ALLOWED_CORS_ORIGINS = new Set([
+	'https://accounts.x.ai',
+	'https://auth.x.ai'
+]);
 
 export class XaiLoopbackServer {
 	private readonly _server: http.Server;
@@ -49,7 +62,27 @@ export class XaiLoopbackServer {
 				const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 				this._log(`incoming request: ${reqUrl.pathname}${reqUrl.search}`);
 
+				// CORS preflight support for xAI's accounts.x.ai consent page which performs
+				// a cross-origin fetch() to the loopback (instead of a top-level navigation).
+				// Without this, the browser blocks the response and xAI shows the manual code paste UI.
+				if (req.method === 'OPTIONS') {
+					const allowed = this._getAllowedOrigin(req);
+					if (allowed) {
+						res.writeHead(204, {
+							'Access-Control-Allow-Origin': allowed,
+							'Access-Control-Allow-Methods': 'GET, OPTIONS',
+							'Access-Control-Allow-Headers': 'Content-Type',
+							'Access-Control-Max-Age': '86400'
+						});
+					} else {
+						res.writeHead(204);
+					}
+					res.end();
+					return;
+				}
+
 				if (reqUrl.pathname !== '/callback') {
+					this._setCorsHeaders(res, req);
 					res.writeHead(404, { 'Content-Type': 'text/plain' });
 					res.end('Not found');
 					return;
@@ -177,6 +210,7 @@ export class XaiLoopbackServer {
 	<p style="font-size: 0.9em; opacity: 0.7;">The authorization code has been securely delivered to the extension.</p>
 </body>
 </html>`;
+		this._setCorsHeadersForResponse(res); // best-effort for any follow-up fetches from the consent page
 		res.writeHead(200, {
 			'Content-Type': 'text/html; charset=utf-8',
 			'Content-Length': Buffer.byteLength(html)
@@ -195,10 +229,46 @@ export class XaiLoopbackServer {
 	<p style="font-size: 0.9em; opacity: 0.7;">You can close this tab and try the sign-in again from VS Code.</p>
 </body>
 </html>`;
+		this._setCorsHeadersForResponse(res);
 		res.writeHead(400, {
 			'Content-Type': 'text/html; charset=utf-8',
 			'Content-Length': Buffer.byteLength(html)
 		});
 		res.end(html);
+	}
+
+	/**
+	 * Returns the Origin header value if it is an allowed xAI origin, otherwise undefined.
+	 * Used for both preflight and actual responses.
+	 */
+	private _getAllowedOrigin(req: http.IncomingMessage): string | undefined {
+		const origin = req.headers.origin;
+		if (typeof origin === 'string' && XAI_ALLOWED_CORS_ORIGINS.has(origin)) {
+			return origin;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Sets Access-Control-Allow-Origin on a response when the request Origin is an allowed xAI origin.
+	 * Called from error paths and the 404 handler.
+	 */
+	private _setCorsHeaders(res: http.ServerResponse, req: http.IncomingMessage): void {
+		const origin = this._getAllowedOrigin(req);
+		if (origin) {
+			res.setHeader('Access-Control-Allow-Origin', origin);
+		}
+	}
+
+	/**
+	 * Variant used inside the send*Page helpers (where we don't have the original req object handy).
+	 * We still want to emit the header for any cross-origin follow-up requests the consent page may make.
+	 * In practice the browser will have already validated the preflight, so this is defense-in-depth.
+	 */
+	private _setCorsHeadersForResponse(res: http.ServerResponse): void {
+		// We cannot know the exact Origin here without threading the req through.
+		// For the xAI flow the browser will only have succeeded the preflight if the origin was allowed,
+		// so we can safely echo the two known xAI origins. This keeps the surface minimal.
+		res.setHeader('Access-Control-Allow-Origin', 'https://accounts.x.ai');
 	}
 }

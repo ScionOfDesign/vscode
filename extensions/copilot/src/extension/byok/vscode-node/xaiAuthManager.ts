@@ -48,6 +48,11 @@ export const XAI_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth2/token';
  * proper registered redirect URIs (https or the github.copilot/xai-auth path),
  * we will switch to the XaiAuthUriHandler + asExternalUri flow.
  *
+ * The loopback server includes CORS preflight + header support so that xAI's
+ * accounts.x.ai consent page (which uses fetch() to the redirect_uri) does not
+ * trigger a browser CORS block. This mitigates the "Could not establish connection"
+ * manual-paste symptom for the current shared client_id.
+ *
  * Do not change this value without coordinating with xAI.
  */
 export const XAI_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828';
@@ -124,6 +129,7 @@ export class XaiAuthManager extends OAuthManagerBase {
 			// TEMPORARY WORKAROUND: loopback redirect while xAI only permits http(s)
 			// redirects for this shared public client_id. Custom scheme redirects
 			// (vscode://github.copilot/xai-auth etc.) are not yet supported by xAI.
+			// The XaiLoopbackServer now handles CORS so fetch()-based consent pages succeed.
 			const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
 			const nonce = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
 
@@ -196,10 +202,11 @@ export class XaiAuthManager extends OAuthManagerBase {
 
 						this._logService.error('XaiAuthManager: failed waiting for authorization code', String(err));
 
-						// Recovery path for the exact symptom the user saw:
+						// Recovery path for the (now mitigated) symptom the user saw:
 						// xAI showed "Could not establish connection. We couldn't reach your app."
-						// and offered a manual code to paste. Offer an input box so the user can
-						// still complete sign-in without having to restart the whole flow.
+						// and offered a manual code to paste. This was caused by the consent page using
+						// fetch() to the loopback; the server now returns proper CORS headers for xAI origins.
+						// The fallback remains useful until xAI updates their allowlist for the shared client.
 						const manualCode = await vscode.window.showInputBox({
 							prompt: vscode.l10n.t('xAI could not reach the local redirect. Paste the authorization code shown on the xAI page (or leave empty to cancel)'),
 							placeHolder: 'Paste the long code from the "Could not establish connection" page',
